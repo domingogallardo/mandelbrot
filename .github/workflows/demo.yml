@@ -55,8 +55,9 @@ jobs:
         Set Framerate 30
 
         # Run mandelbrot with trajectory animation (15 seconds)
-        # Use --auto=15 syntax (equals sign required for getopt optional args)
-        Type "./mandelbrot --pos -0.7115114743-0.3078112463i --zoom 1.86e+11 --auto=15"
+        # Use moderate zoom (1e8) for smooth real-time rendering on CI runners
+        # Higher zoom (1e11+) is too slow - perturbation theory takes seconds per frame
+        Type "./mandelbrot --pos -0.7453+0.1127i --zoom 1e8 --auto=15"
         Enter
 
         # Wait for animation to complete (add buffer for startup)

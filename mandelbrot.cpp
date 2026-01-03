@@ -511,7 +511,7 @@ struct MandelbrotState {
     // Pan offset accumulator for deep zoom navigation
     // At extreme zoom, adding small pan deltas to center_dd loses precision.
     // Instead, we accumulate pan offsets separately and apply to δC computation.
-    // Stored in world coordinates (pre-rotation).
+    // Stored in SCREEN coordinates - rotated to world coords when committed or displayed.
     DD pan_offset_x{0.0};
     DD pan_offset_y{0.0};
 
@@ -528,12 +528,20 @@ struct MandelbrotState {
     }
 
     // Commit accumulated pan offset to center coordinates
+    // Pan offset is in SCREEN coords, must rotate to world coords before adding
     // Call on zoom change, mode transition, reset, etc.
     void commit_pan_offset() {
         if (pan_offset_x.hi != 0.0 || pan_offset_x.lo != 0.0 ||
             pan_offset_y.hi != 0.0 || pan_offset_y.lo != 0.0) {
-            center_x_dd = dd_add(center_x_dd, pan_offset_x);
-            center_y_dd = dd_add(center_y_dd, pan_offset_y);
+            // Rotate screen coords to world coords
+            double cos_a = cos(angle);
+            double sin_a = sin(angle);
+            double pan_sx = pan_offset_x.hi + pan_offset_x.lo;
+            double pan_sy = pan_offset_y.hi + pan_offset_y.lo;
+            double pan_world_x = pan_sx * cos_a - pan_sy * sin_a;
+            double pan_world_y = pan_sx * sin_a + pan_sy * cos_a;
+            center_x_dd = dd_add(center_x_dd, pan_world_x);
+            center_y_dd = dd_add(center_y_dd, pan_world_y);
             pan_offset_x = DD(0.0);
             pan_offset_y = DD(0.0);
             sync_centers_to_dd();
@@ -541,11 +549,22 @@ struct MandelbrotState {
     }
 
     // Get effective center (center + pan_offset) for display
+    // Pan offset is in screen coords, rotate to world coords
     DD effective_center_x() const {
-        return dd_add(center_x_dd, pan_offset_x);
+        double cos_a = cos(angle);
+        double sin_a = sin(angle);
+        double pan_sx = pan_offset_x.hi + pan_offset_x.lo;
+        double pan_sy = pan_offset_y.hi + pan_offset_y.lo;
+        double pan_world_x = pan_sx * cos_a - pan_sy * sin_a;
+        return dd_add(center_x_dd, pan_world_x);
     }
     DD effective_center_y() const {
-        return dd_add(center_y_dd, pan_offset_y);
+        double cos_a = cos(angle);
+        double sin_a = sin(angle);
+        double pan_sx = pan_offset_x.hi + pan_offset_x.lo;
+        double pan_sy = pan_offset_y.hi + pan_offset_y.lo;
+        double pan_world_y = pan_sx * sin_a + pan_sy * cos_a;
+        return dd_add(center_y_dd, pan_world_y);
     }
 };
 
@@ -729,7 +748,7 @@ void compute_perturbation_scalar(MandelbrotState& state,
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
 
-    // Pan offset in world coordinates - collapse DD to double
+    // Pan offset in SCREEN coordinates - collapse DD to double
     // This is safe because pan_offset and pixel_offset are both tiny at extreme zoom
     double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
     double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
@@ -745,12 +764,14 @@ void compute_perturbation_scalar(MandelbrotState& state,
             // Skip if doing glitch-only pass and this isn't a glitch
             if (glitch_only && state.iterations[idx] != -2.0) continue;
 
-            // Compute rotated pixel offset from center
+            // Compute pixel offset from center (screen coords)
             double dx = (x - state.width / 2.0) / state.width * scale * aspect;
 
-            // δC = pixel_offset + pan_offset (both tiny values at extreme zoom)
-            double dCr = dx * cos_a - dy * sin_a + pan_x;
-            double dCi = dx * sin_a + dy * cos_a + pan_y;
+            // δC = rotate(pixel_offset + pan_offset) - both in screen coords
+            double total_x = dx + pan_x;
+            double total_y = dy + pan_y;
+            double dCr = total_x * cos_a - total_y * sin_a;
+            double dCi = total_x * sin_a + total_y * cos_a;
 
             // Perturbation iteration
             double dzr = 0.0, dzi = 0.0;
@@ -882,25 +903,27 @@ void compute_perturbation_avx2(MandelbrotState& state,
 
     for (int y = start_row; y < end_row; y++) {
         double dy = (y - state.height / 2.0) / state.height * scale;
+        double total_y = dy + pan_y;  // Add pan_y in screen coords
 
         for (int x = 0; x < state.width; x += 4) {
-            // Compute rotated δC for 4 pixels + pan_offset
-            double dx0 = (x - state.width / 2.0) / state.width * scale * aspect;
-            double dx1 = ((x + 1) - state.width / 2.0) / state.width * scale * aspect;
-            double dx2 = ((x + 2) - state.width / 2.0) / state.width * scale * aspect;
-            double dx3 = ((x + 3) - state.width / 2.0) / state.width * scale * aspect;
+            // Compute pixel offsets (screen coords) + pan_offset, then rotate
+            double dx0 = (x - state.width / 2.0) / state.width * scale * aspect + pan_x;
+            double dx1 = ((x + 1) - state.width / 2.0) / state.width * scale * aspect + pan_x;
+            double dx2 = ((x + 2) - state.width / 2.0) / state.width * scale * aspect + pan_x;
+            double dx3 = ((x + 3) - state.width / 2.0) / state.width * scale * aspect + pan_x;
 
+            // δC = rotate(pixel_offset + pan_offset)
             __m256d dC_r = _mm256_set_pd(
-                dx3 * cos_a - dy * sin_a + pan_x,
-                dx2 * cos_a - dy * sin_a + pan_x,
-                dx1 * cos_a - dy * sin_a + pan_x,
-                dx0 * cos_a - dy * sin_a + pan_x
+                dx3 * cos_a - total_y * sin_a,
+                dx2 * cos_a - total_y * sin_a,
+                dx1 * cos_a - total_y * sin_a,
+                dx0 * cos_a - total_y * sin_a
             );
             __m256d dC_i = _mm256_set_pd(
-                dx3 * sin_a + dy * cos_a + pan_y,
-                dx2 * sin_a + dy * cos_a + pan_y,
-                dx1 * sin_a + dy * cos_a + pan_y,
-                dx0 * sin_a + dy * cos_a + pan_y
+                dx3 * sin_a + total_y * cos_a,
+                dx2 * sin_a + total_y * cos_a,
+                dx1 * sin_a + total_y * cos_a,
+                dx0 * sin_a + total_y * cos_a
             );
 
             __m256d dzr = _mm256_setzero_pd();
@@ -1577,16 +1600,11 @@ void handle_input(MandelbrotState& state) {
     switch (key) {
         case KEY_UP:
             if (use_pan_offset) {
-                // Accumulate in pan_offset to preserve precision at extreme zoom
-                // Pan offset is in world coords, so we apply view rotation
+                // Accumulate in pan_offset in SCREEN coords (not rotated)
+                // Rotation is applied in perturbation loop along with pixel offset
                 double move = 0.1 / state.zoom;
-                double cos_a = cos(state.angle);
-                double sin_a = sin(state.angle);
-                // Screen-up maps to rotated world coords
-                double dx = move * sin_a;   // World X component of screen-up
-                double dy = -move * cos_a;  // World Y component of screen-up
-                state.pan_offset_x = dd_add(state.pan_offset_x, dx);
-                state.pan_offset_y = dd_add(state.pan_offset_y, dy);
+                // Screen-up is -Y in screen coords
+                state.pan_offset_y = dd_add(state.pan_offset_y, -move);
             } else {
                 state.center_y -= 0.1 / state.zoom;
                 state.sync_centers_from_double();
@@ -1596,12 +1614,8 @@ void handle_input(MandelbrotState& state) {
         case KEY_DOWN:
             if (use_pan_offset) {
                 double move = 0.1 / state.zoom;
-                double cos_a = cos(state.angle);
-                double sin_a = sin(state.angle);
-                double dx = -move * sin_a;
-                double dy = move * cos_a;
-                state.pan_offset_x = dd_add(state.pan_offset_x, dx);
-                state.pan_offset_y = dd_add(state.pan_offset_y, dy);
+                // Screen-down is +Y in screen coords
+                state.pan_offset_y = dd_add(state.pan_offset_y, move);
             } else {
                 state.center_y += 0.1 / state.zoom;
                 state.sync_centers_from_double();
@@ -1611,13 +1625,8 @@ void handle_input(MandelbrotState& state) {
         case KEY_LEFT:
             if (use_pan_offset) {
                 double move = 0.1 / state.zoom;
-                double cos_a = cos(state.angle);
-                double sin_a = sin(state.angle);
-                // Screen-left maps to rotated world coords
-                double dx = -move * cos_a;
-                double dy = -move * sin_a;
-                state.pan_offset_x = dd_add(state.pan_offset_x, dx);
-                state.pan_offset_y = dd_add(state.pan_offset_y, dy);
+                // Screen-left is -X in screen coords
+                state.pan_offset_x = dd_add(state.pan_offset_x, -move);
             } else {
                 state.center_x -= 0.1 / state.zoom;
                 state.sync_centers_from_double();
@@ -1627,12 +1636,8 @@ void handle_input(MandelbrotState& state) {
         case KEY_RIGHT:
             if (use_pan_offset) {
                 double move = 0.1 / state.zoom;
-                double cos_a = cos(state.angle);
-                double sin_a = sin(state.angle);
-                double dx = move * cos_a;
-                double dy = move * sin_a;
-                state.pan_offset_x = dd_add(state.pan_offset_x, dx);
-                state.pan_offset_y = dd_add(state.pan_offset_y, dy);
+                // Screen-right is +X in screen coords
+                state.pan_offset_x = dd_add(state.pan_offset_x, move);
             } else {
                 state.center_x += 0.1 / state.zoom;
                 state.sync_centers_from_double();

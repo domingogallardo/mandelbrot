@@ -717,9 +717,9 @@ inline bool needs_perturbation(const MandelbrotState& state) {
 }
 
 // Scalar perturbation computation
-// INVARIANT: The reference orbit MUST be computed at effective_center (center_dd + pan_offset).
-//            δC contains only pixel offset from center, not pan_offset.
-//            Violating this invariant will cause the image to be offset by pan_offset.
+// Reference orbit is at center_dd. Pan offset is added to δC to shift the view.
+// At extreme zoom, both pixel_offset and pan_offset are tiny values (~1e-38),
+// so adding them in double precision preserves accuracy.
 void compute_perturbation_scalar(MandelbrotState& state,
                                  const ReferenceOrbit& orbit,
                                  int start_row, int end_row,
@@ -728,6 +728,11 @@ void compute_perturbation_scalar(MandelbrotState& state,
     double scale = 3.0 / state.zoom;
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
+
+    // Pan offset in world coordinates - collapse DD to double
+    // This is safe because pan_offset and pixel_offset are both tiny at extreme zoom
+    double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
+    double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
 
     int max_ref_iter = orbit.length - 1;
 
@@ -743,9 +748,9 @@ void compute_perturbation_scalar(MandelbrotState& state,
             // Compute rotated pixel offset from center
             double dx = (x - state.width / 2.0) / state.width * scale * aspect;
 
-            // δC = offset from reference center (which is at effective_center)
-            double dCr = dx * cos_a - dy * sin_a;
-            double dCi = dx * sin_a + dy * cos_a;
+            // δC = pixel_offset + pan_offset (both tiny values at extreme zoom)
+            double dCr = dx * cos_a - dy * sin_a + pan_x;
+            double dCi = dx * sin_a + dy * cos_a + pan_y;
 
             // Perturbation iteration
             double dzr = 0.0, dzi = 0.0;
@@ -854,9 +859,7 @@ void compute_perturbation_scalar(MandelbrotState& state,
 
 #if USE_AVX2
 // AVX2 perturbation computation
-// INVARIANT: The reference orbit MUST be computed at effective_center (center_dd + pan_offset).
-//            δC contains only pixel offset from center, not pan_offset.
-//            Violating this invariant will cause the image to be offset by pan_offset.
+// Reference orbit is at center_dd. Pan offset is added to δC to shift the view.
 void compute_perturbation_avx2(MandelbrotState& state,
                                const ReferenceOrbit& orbit,
                                int start_row, int end_row) {
@@ -864,6 +867,10 @@ void compute_perturbation_avx2(MandelbrotState& state,
     double scale = 3.0 / state.zoom;
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
+
+    // Pan offset in world coordinates
+    double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
+    double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
 
     __m256d four = _mm256_set1_pd(4.0);
     __m256d two = _mm256_set1_pd(2.0);
@@ -877,23 +884,23 @@ void compute_perturbation_avx2(MandelbrotState& state,
         double dy = (y - state.height / 2.0) / state.height * scale;
 
         for (int x = 0; x < state.width; x += 4) {
-            // Compute rotated δC for 4 pixels (reference is at effective_center)
+            // Compute rotated δC for 4 pixels + pan_offset
             double dx0 = (x - state.width / 2.0) / state.width * scale * aspect;
             double dx1 = ((x + 1) - state.width / 2.0) / state.width * scale * aspect;
             double dx2 = ((x + 2) - state.width / 2.0) / state.width * scale * aspect;
             double dx3 = ((x + 3) - state.width / 2.0) / state.width * scale * aspect;
 
             __m256d dC_r = _mm256_set_pd(
-                dx3 * cos_a - dy * sin_a,
-                dx2 * cos_a - dy * sin_a,
-                dx1 * cos_a - dy * sin_a,
-                dx0 * cos_a - dy * sin_a
+                dx3 * cos_a - dy * sin_a + pan_x,
+                dx2 * cos_a - dy * sin_a + pan_x,
+                dx1 * cos_a - dy * sin_a + pan_x,
+                dx0 * cos_a - dy * sin_a + pan_x
             );
             __m256d dC_i = _mm256_set_pd(
-                dx3 * sin_a + dy * cos_a,
-                dx2 * sin_a + dy * cos_a,
-                dx1 * sin_a + dy * cos_a,
-                dx0 * sin_a + dy * cos_a
+                dx3 * sin_a + dy * cos_a + pan_y,
+                dx2 * sin_a + dy * cos_a + pan_y,
+                dx1 * sin_a + dy * cos_a + pan_y,
+                dx0 * sin_a + dy * cos_a + pan_y
             );
 
             __m256d dzr = _mm256_setzero_pd();
@@ -1348,11 +1355,13 @@ void compute_mandelbrot_unified(MandelbrotState& state) {
         int min_iter_for_zoom = 256 + (int)(log10(std::max(1.0, state.zoom)) * 64);
         int effective_max_iter = std::max(state.max_iter, std::min(4096, min_iter_for_zoom));
 
-        // Compute reference orbit at effective center (center_dd + pan_offset)
-        // This ensures full DD precision - adding pan_offset to δC as double loses precision at extreme zoom
-        DD eff_x = state.effective_center_x();
-        DD eff_y = state.effective_center_y();
-        compute_reference_orbit(state.primary_orbit, eff_x, eff_y, effective_max_iter);
+        // Compute reference orbit at center_dd (not effective_center)
+        // Pan offset is added to δC in perturbation loop - this allows panning without
+        // recomputing reference orbit, and works because both pixel_offset and pan_offset
+        // are tiny values at extreme zoom (same order of magnitude)
+        compute_reference_orbit(state.primary_orbit,
+                               state.center_x_dd, state.center_y_dd,
+                               effective_max_iter);
 
         // Temporarily use scaled iterations for perturbation
         int saved_max_iter = state.max_iter;

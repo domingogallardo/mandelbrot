@@ -59,8 +59,9 @@ jobs:
         Type "./mandelbrot --pos -0.99999990959780061:5.4666149278543518e-18-0.29019415957242539:-1.502698260044518e-17i --zoom 9.641024524371531e+12 --auto=20"
         Enter
 
-        # Wait for animation to complete (add buffer for startup/rendering)
-        Sleep 25s
+        # Wait for animation to complete
+        # At deep zoom, rendering takes longer - add extra buffer
+        Sleep 30s
 
         # Send quit command in case trajectory didn't exit cleanly
         Type "q"
@@ -96,10 +97,15 @@ jobs:
     - name: Optimize GIF
       run: |
         if [ -f assets/mandelbrot.gif ]; then
-          # Optimize GIF size with ffmpeg
-          ffmpeg -i assets/mandelbrot.gif -vf "fps=15,scale=640:-1:flags=lanczos" -y assets/mandelbrot_opt.gif || true
+          # Check original duration
+          echo "Original GIF info:"
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 assets/mandelbrot.gif || true
+          # Optimize GIF size - only scale, preserve framerate to maintain duration
+          ffmpeg -i assets/mandelbrot.gif -vf "scale=640:-1:flags=lanczos" -y assets/mandelbrot_opt.gif || true
           if [ -f assets/mandelbrot_opt.gif ]; then
             mv assets/mandelbrot_opt.gif assets/mandelbrot.gif
+            echo "Optimized GIF info:"
+            ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 assets/mandelbrot.gif || true
           fi
           ls -la assets/
         fi

@@ -39,7 +39,7 @@ make native
 ./mandelbrot --auto
 
 # Animated trajectory (zoom from default to target over 60 seconds)
-./mandelbrot --pos -0.7115114743-0.3078112463i --zoom 1.86e+11 --auto 60
+./mandelbrot --pos -0.7115114743-0.3078112463i --zoom 1.86e+11 --auto=60
 ```
 
 ### Command Line Options

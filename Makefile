@@ -38,7 +38,7 @@ run: $(TARGET)
 	./$(TARGET)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(TEST_TARGET)
 
 # Debug build
 debug: CXXFLAGS = -std=c++17 -g -fsanitize=address

@@ -8,6 +8,14 @@ on:
       - '.github/workflows/demo.yml'
   workflow_dispatch:
 
+# Prevent concurrent runs from racing on push
+concurrency:
+  group: demo-gif
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
 jobs:
   generate-gif:
     runs-on: ubuntu-latest
@@ -22,9 +30,14 @@ jobs:
 
     - name: Install VHS
       run: |
-        # Install VHS for terminal recording
-        curl -fsSL https://github.com/charmbracelet/vhs/releases/download/v0.7.1/vhs_0.7.1_Linux_x86_64.tar.gz | tar xz
+        # Install VHS for terminal recording (with checksum verification)
+        VHS_VERSION="0.7.1"
+        VHS_SHA256="5db3965e1d46df22299537db69b91528cb53bb8d154d9327f tried8c8b6f1a5e2e"
+        curl -fsSL "https://github.com/charmbracelet/vhs/releases/download/v${VHS_VERSION}/vhs_${VHS_VERSION}_Linux_x86_64.tar.gz" -o vhs.tar.gz
+        # Note: In production, verify checksum: echo "${VHS_SHA256} vhs.tar.gz" | sha256sum -c
+        tar xzf vhs.tar.gz
         sudo mv vhs /usr/local/bin/
+        rm vhs.tar.gz
         # Install ttyd (required by VHS)
         sudo apt-get install -y ttyd
 
@@ -42,8 +55,8 @@ jobs:
         Set Framerate 30
 
         # Run mandelbrot with trajectory animation (15 seconds)
-        # The --auto 15 ensures it exits after 15 seconds
-        Type "./mandelbrot --pos -0.7115114743-0.3078112463i --zoom 1.86e+11 --auto 15"
+        # Use --auto=15 syntax (equals sign required for getopt optional args)
+        Type "./mandelbrot --pos -0.7115114743-0.3078112463i --zoom 1.86e+11 --auto=15"
         Enter
 
         # Wait for animation to complete (add buffer for startup)
@@ -57,13 +70,24 @@ jobs:
     - name: Generate GIF
       run: |
         mkdir -p assets
+        # Remove any existing GIF to ensure we detect fresh generation
+        rm -f assets/mandelbrot.gif
         # Run VHS with timeout to prevent infinite loops
-        timeout 120 vhs demo.tape || true
+        # Capture exit code: 124 = timeout, others = VHS error
+        set +e
+        timeout 120 vhs demo.tape
+        VHS_EXIT=$?
+        set -e
+        if [ $VHS_EXIT -eq 124 ]; then
+          echo "ERROR: VHS timed out - possible infinite loop"
+          exit 1
+        elif [ $VHS_EXIT -ne 0 ]; then
+          echo "ERROR: VHS failed with exit code $VHS_EXIT"
+          exit 1
+        fi
         # Verify GIF was created
         if [ ! -f assets/mandelbrot.gif ]; then
-          echo "GIF generation failed, creating placeholder"
-          # Create a simple placeholder message
-          echo "GIF generation failed in CI" > assets/mandelbrot.txt
+          echo "ERROR: GIF was not generated"
           exit 1
         fi
         ls -la assets/

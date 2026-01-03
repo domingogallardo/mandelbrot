@@ -717,6 +717,9 @@ inline bool needs_perturbation(const MandelbrotState& state) {
 }
 
 // Scalar perturbation computation
+// INVARIANT: The reference orbit MUST be computed at effective_center (center_dd + pan_offset).
+//            δC contains only pixel offset from center, not pan_offset.
+//            Violating this invariant will cause the image to be offset by pan_offset.
 void compute_perturbation_scalar(MandelbrotState& state,
                                  const ReferenceOrbit& orbit,
                                  int start_row, int end_row,
@@ -725,10 +728,6 @@ void compute_perturbation_scalar(MandelbrotState& state,
     double scale = 3.0 / state.zoom;
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
-
-    // Reference orbit is now computed at effective_center (center_dd + pan_offset)
-    // so we don't need to add pan_offset to δC anymore - it's already accounted for
-    // in the reference position with full DD precision
 
     int max_ref_iter = orbit.length - 1;
 
@@ -855,6 +854,9 @@ void compute_perturbation_scalar(MandelbrotState& state,
 
 #if USE_AVX2
 // AVX2 perturbation computation
+// INVARIANT: The reference orbit MUST be computed at effective_center (center_dd + pan_offset).
+//            δC contains only pixel offset from center, not pan_offset.
+//            Violating this invariant will cause the image to be offset by pan_offset.
 void compute_perturbation_avx2(MandelbrotState& state,
                                const ReferenceOrbit& orbit,
                                int start_row, int end_row) {
@@ -862,9 +864,6 @@ void compute_perturbation_avx2(MandelbrotState& state,
     double scale = 3.0 / state.zoom;
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
-
-    // Reference orbit is now computed at effective_center (center_dd + pan_offset)
-    // so we don't need to add pan_offset to δC anymore
 
     __m256d four = _mm256_set1_pd(4.0);
     __m256d two = _mm256_set1_pd(2.0);
@@ -2391,6 +2390,9 @@ void print_usage(const char* prog) {
     printf("  --auto [N]         Enable automatic exploration, or with --pos/--zoom:\n");
     printf("                     animate from default to target over N seconds (default 30)\n");
     printf("  --help             Show this help message\n");
+    printf("\nDebug options:\n");
+    printf("  --debug            Print DD precision values to stderr at parse and exit\n");
+    printf("  --exit-now         Exit immediately after parsing (for testing DD round-trip)\n");
     printf("\nExamples:\n");
     printf("  %s --pos -0.7+0.3i --zoom 1e6\n", prog);
     printf("      Start at specified position and zoom\n");

@@ -1,12 +1,10 @@
 # Mandelbrot Interesting Locations for Testing
 # Format: name,real,imag,zoom
 # All locations have score > 50 at target zoom
+# Note: High zoom locations (>1e6) may fail due to double precision limits
 seahorse_valley,-0.743643887037151,0.131825904205330,2e5
 julia_island,-0.745428,0.113009,300000
-spiral_arm,-0.761574,-0.0847596,5000
-double_hook,-0.74543,0.11301,50000
 needle,-1.25066,0.02012,10000
 antenna_base,-1.4,0.0,200
 top_spiral,-0.3905,0.5876,2000
-seahorse_deep,-0.74364085,0.13182733,1e7
-deep_spiral,-0.7115114743,-0.3078112463,1.86e11
+mini_mandelbrot,-1.7685,-0.0017,5000

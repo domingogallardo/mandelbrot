@@ -33,9 +33,9 @@ jobs:
     - name: Build trajectory tests
       run: make test_trajectory CXX=${{ matrix.compiler }}
 
-    - name: Run trajectory tests (location only)
-      run: ./test_trajectory --skip-trajectory
-      timeout-minutes: 5
+    - name: Run trajectory tests
+      run: ./test_trajectory
+      timeout-minutes: 15
 
   build-avx2:
     runs-on: ubuntu-latest
@@ -56,6 +56,6 @@ jobs:
     - name: Build trajectory tests with AVX2
       run: make test_trajectory CXXFLAGS="-std=c++17 -O3 -flto -fno-fast-math -mavx2"
 
-    - name: Run AVX2 trajectory tests (location only)
-      run: ./test_trajectory --skip-trajectory
-      timeout-minutes: 5
+    - name: Run AVX2 trajectory tests
+      run: ./test_trajectory
+      timeout-minutes: 15

@@ -504,6 +504,7 @@ struct MandelbrotState {
     DD center_x_dd{-0.5};          // High-precision center X
     DD center_y_dd{0.0};           // High-precision center Y
     bool use_perturbation = false; // Auto-enabled at deep zoom
+    bool dd_authoritative = false; // True if DD was set via --pos with full precision
     ReferenceOrbit primary_orbit;  // Primary reference orbit
     std::vector<std::pair<int,int>> glitch_pixels;  // Pixels needing recompute
 
@@ -514,14 +515,16 @@ struct MandelbrotState {
     DD pan_offset_x{0.0};
     DD pan_offset_y{0.0};
 
-    // Sync DD and double centers
+    // Sync DD and double centers (for display/compatibility)
+    // Note: center_x/y are doubles, so we sum hi+lo for best approximation
     void sync_centers_to_dd() {
-        center_x = center_x_dd.hi;
-        center_y = center_y_dd.hi;
+        center_x = center_x_dd.hi + center_x_dd.lo;
+        center_y = center_y_dd.hi + center_y_dd.lo;
     }
     void sync_centers_from_double() {
         center_x_dd = DD(center_x);
         center_y_dd = DD(center_y);
+        dd_authoritative = false;  // Double is now authoritative
     }
 
     // Commit accumulated pan offset to center coordinates
@@ -1346,7 +1349,8 @@ void compute_mandelbrot_unified(MandelbrotState& state) {
         // Sync DD centers from double on mode transition
         // This ensures DD centers match double centers if user panned/zoomed
         // before entering perturbation mode
-        if (!was_perturbation) {
+        // BUT: skip if DD is authoritative (position was specified with full DD precision)
+        if (!was_perturbation && !state.dd_authoritative) {
             state.sync_centers_from_double();
         }
 
@@ -1688,6 +1692,7 @@ void handle_input(MandelbrotState& state) {
             state.center_y_dd = DD(0.0);
             state.pan_offset_x = DD(0.0);  // Clear pan offset on reset
             state.pan_offset_y = DD(0.0);
+            state.dd_authoritative = false;  // Clear DD authority on reset
             state.zoom = 1.0;
             state.angle = 0.0;
             state.max_iter = 256;
@@ -2379,10 +2384,72 @@ bool parse_complex(const char* str, double& re, double& im) {
     return (*end == '\0');
 }
 
+// Parse complex number with DD (double-double) precision
+// Formats supported:
+//   DD format: <re_hi>:<re_lo><sign><im_hi>:<im_lo>i
+//   Example:   -0.7115114743:1.2e-17+-0.3078112463:3.4e-18i
+//   Regular:   -0.5+0.3i (falls back to regular parsing, .lo = 0)
+bool parse_complex_dd(const char* str, DD& re_dd, DD& im_dd) {
+    // Check for DD format indicator (colon in the string)
+    if (strchr(str, ':') == nullptr) {
+        // No colon = regular format, fall back to double parsing
+        double re, im;
+        if (parse_complex(str, re, im)) {
+            re_dd = DD(re);
+            im_dd = DD(im);
+            return true;
+        }
+        return false;
+    }
+
+    // DD format: re_hi:re_lo+im_hi:im_lo i  or  re_hi:re_lo-im_hi:im_lo i
+    // Parse real part: re_hi:re_lo
+    char* end;
+    double re_hi = strtod(str, &end);
+    if (end == str || *end != ':') return false;
+
+    const char* re_lo_start = end + 1;
+    double re_lo = strtod(re_lo_start, &end);
+    if (end == re_lo_start) return false;
+
+    // Parse sign separator between real and imaginary
+    if (*end != '+' && *end != '-') return false;
+    char sign = *end;
+    end++;
+
+    // Parse imaginary part: im_hi:im_lo i
+    double im_hi = strtod(end, &end);
+    if (*end != ':') return false;
+
+    const char* im_lo_start = end + 1;
+    double im_lo = strtod(im_lo_start, &end);
+    if (end == im_lo_start) return false;
+
+    // Require 'i' suffix
+    if (*end != 'i' && *end != 'I') return false;
+    end++;
+
+    // Skip trailing whitespace
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0') return false;
+
+    // Apply sign to imaginary part
+    if (sign == '-') {
+        im_hi = -im_hi;
+        im_lo = -im_lo;
+    }
+
+    re_dd = DD{re_hi, re_lo};
+    im_dd = DD{im_hi, im_lo};
+    return true;
+}
+
 void print_usage(const char* prog) {
     printf("Usage: %s [options]\n", prog);
     printf("\nOptions:\n");
-    printf("  --pos <re+imi>     Target position (e.g., -0.5+0.3i)\n");
+    printf("  --pos <position>   Target position in complex format:\n");
+    printf("                     Standard: re+imi (e.g., -0.5+0.3i)\n");
+    printf("                     DD:       re_hi:re_lo+im_hi:im_lo i (deep zoom)\n");
     printf("  --zoom <value>     Target zoom level (e.g., 1e6)\n");
     printf("  --angle <degrees>  Target view angle (e.g., 45)\n");
     printf("  --auto [N]         Enable automatic exploration, or with --pos/--zoom:\n");
@@ -2437,19 +2504,26 @@ int main(int argc, char* argv[]) {
     while ((opt = getopt_long(argc, argv, "p:z:a:Ah", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'p': {
-                double re, im;
-                if (parse_complex(optarg, re, im)) {
-                    cli_target_x = re;
-                    cli_target_y = im;
+                DD re_dd, im_dd;
+                if (parse_complex_dd(optarg, re_dd, im_dd)) {
+                    // Set DD values with full precision
+                    state.center_x_dd = re_dd;
+                    state.center_y_dd = im_dd;
+                    // Sync double values from DD (hi + lo for best approximation)
+                    state.center_x = re_dd.hi + re_dd.lo;
+                    state.center_y = im_dd.hi + im_dd.lo;
+                    // Mark DD as authoritative if .lo components are non-zero
+                    // (i.e., DD format was used, not regular double format)
+                    state.dd_authoritative = (re_dd.lo != 0.0 || im_dd.lo != 0.0);
+                    // Set trajectory targets
+                    cli_target_x = state.center_x;
+                    cli_target_y = state.center_y;
                     has_target_pos = true;
-                    // Set state immediately (will be overridden if trajectory mode)
-                    state.center_x = re;
-                    state.center_y = im;
-                    state.center_x_dd = DD(re);
-                    state.center_y_dd = DD(im);
                 } else {
                     fprintf(stderr, "Error: Invalid position format '%s'\n", optarg);
-                    fprintf(stderr, "Expected format: re+imi (e.g., -0.5+0.3i)\n");
+                    fprintf(stderr, "Expected formats:\n");
+                    fprintf(stderr, "  Standard: re+imi (e.g., -0.5+0.3i)\n");
+                    fprintf(stderr, "  DD:       re_hi:re_lo+im_hi:im_lo i (for deep zoom)\n");
                     return 1;
                 }
                 break;
@@ -2590,12 +2664,22 @@ int main(int argc, char* argv[]) {
 
     restore_terminal();
 
+    // Commit any accumulated pan offset before printing final position
+    state.commit_pan_offset();
+
     // Print CLI command to return to this location
+    // Use DD format (hi:lo) for full precision at deep zoom
     double angle_deg = state.angle * 180.0 / M_PI;
     printf("\n");
     printf("To return to this location:\n");
-    printf("  ./mandelbrot --pos %.17g%+.17gi --zoom %.17g --angle %.6f\n",
-           state.center_x, state.center_y, state.zoom, angle_deg);
+    // Format: --pos <re_hi>:<re_lo><sign><im_hi>:<im_lo>i
+    char sign = (state.center_y_dd.hi >= 0) ? '+' : '-';
+    double im_hi_abs = fabs(state.center_y_dd.hi);
+    double im_lo = (state.center_y_dd.hi >= 0) ? state.center_y_dd.lo : -state.center_y_dd.lo;
+    printf("  ./mandelbrot --pos %.17g:%.17g%c%.17g:%.17gi --zoom %.17g --angle %.6f\n",
+           state.center_x_dd.hi, state.center_x_dd.lo,
+           sign, im_hi_abs, im_lo,
+           state.zoom, angle_deg);
     printf("\n");
     printf("Thanks for exploring the Mandelbrot set!\n");
     printf("Compiled with %s optimization\n", USE_AVX2 ? "AVX2 SIMD" : "scalar");

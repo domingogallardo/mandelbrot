@@ -726,13 +726,9 @@ void compute_perturbation_scalar(MandelbrotState& state,
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
 
-    // Use full DD precision for reference center (hi + lo)
-    double ref_cr = orbit.center_re.hi + orbit.center_re.lo;
-    double ref_ci = orbit.center_im.hi + orbit.center_im.lo;
-
-    // Pan offset in world coordinates (add to δC for each pixel)
-    double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
-    double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
+    // Reference orbit is now computed at effective_center (center_dd + pan_offset)
+    // so we don't need to add pan_offset to δC anymore - it's already accounted for
+    // in the reference position with full DD precision
 
     int max_ref_iter = orbit.length - 1;
 
@@ -748,10 +744,9 @@ void compute_perturbation_scalar(MandelbrotState& state,
             // Compute rotated pixel offset from center
             double dx = (x - state.width / 2.0) / state.width * scale * aspect;
 
-            // δC = offset from reference center + pan_offset (in world coords)
-            // pan_offset shifts the effective view center without modifying center_dd
-            double dCr = dx * cos_a - dy * sin_a + pan_x;
-            double dCi = dx * sin_a + dy * cos_a + pan_y;
+            // δC = offset from reference center (which is at effective_center)
+            double dCr = dx * cos_a - dy * sin_a;
+            double dCi = dx * sin_a + dy * cos_a;
 
             // Perturbation iteration
             double dzr = 0.0, dzi = 0.0;
@@ -868,13 +863,8 @@ void compute_perturbation_avx2(MandelbrotState& state,
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
 
-    // Use full DD precision for reference center (hi + lo)
-    double ref_cr = orbit.center_re.hi + orbit.center_re.lo;
-    double ref_ci = orbit.center_im.hi + orbit.center_im.lo;
-
-    // Pan offset in world coordinates (add to δC for each pixel)
-    double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
-    double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
+    // Reference orbit is now computed at effective_center (center_dd + pan_offset)
+    // so we don't need to add pan_offset to δC anymore
 
     __m256d four = _mm256_set1_pd(4.0);
     __m256d two = _mm256_set1_pd(2.0);
@@ -888,23 +878,23 @@ void compute_perturbation_avx2(MandelbrotState& state,
         double dy = (y - state.height / 2.0) / state.height * scale;
 
         for (int x = 0; x < state.width; x += 4) {
-            // Compute rotated δC for 4 pixels + pan_offset
+            // Compute rotated δC for 4 pixels (reference is at effective_center)
             double dx0 = (x - state.width / 2.0) / state.width * scale * aspect;
             double dx1 = ((x + 1) - state.width / 2.0) / state.width * scale * aspect;
             double dx2 = ((x + 2) - state.width / 2.0) / state.width * scale * aspect;
             double dx3 = ((x + 3) - state.width / 2.0) / state.width * scale * aspect;
 
             __m256d dC_r = _mm256_set_pd(
-                dx3 * cos_a - dy * sin_a + pan_x,
-                dx2 * cos_a - dy * sin_a + pan_x,
-                dx1 * cos_a - dy * sin_a + pan_x,
-                dx0 * cos_a - dy * sin_a + pan_x
+                dx3 * cos_a - dy * sin_a,
+                dx2 * cos_a - dy * sin_a,
+                dx1 * cos_a - dy * sin_a,
+                dx0 * cos_a - dy * sin_a
             );
             __m256d dC_i = _mm256_set_pd(
-                dx3 * sin_a + dy * cos_a + pan_y,
-                dx2 * sin_a + dy * cos_a + pan_y,
-                dx1 * sin_a + dy * cos_a + pan_y,
-                dx0 * sin_a + dy * cos_a + pan_y
+                dx3 * sin_a + dy * cos_a,
+                dx2 * sin_a + dy * cos_a,
+                dx1 * sin_a + dy * cos_a,
+                dx0 * sin_a + dy * cos_a
             );
 
             __m256d dzr = _mm256_setzero_pd();
@@ -1359,11 +1349,11 @@ void compute_mandelbrot_unified(MandelbrotState& state) {
         int min_iter_for_zoom = 256 + (int)(log10(std::max(1.0, state.zoom)) * 64);
         int effective_max_iter = std::max(state.max_iter, std::min(4096, min_iter_for_zoom));
 
-        // Compute reference orbit at effective center (includes pan_offset)
-        // Note: reference is computed at the stored center, perturbation applies pan_offset via δC
-        compute_reference_orbit(state.primary_orbit,
-                               state.center_x_dd, state.center_y_dd,
-                               effective_max_iter);
+        // Compute reference orbit at effective center (center_dd + pan_offset)
+        // This ensures full DD precision - adding pan_offset to δC as double loses precision at extreme zoom
+        DD eff_x = state.effective_center_x();
+        DD eff_y = state.effective_center_y();
+        compute_reference_orbit(state.primary_orbit, eff_x, eff_y, effective_max_iter);
 
         // Temporarily use scaled iterations for perturbation
         int saved_max_iter = state.max_iter;
@@ -2437,19 +2427,23 @@ int main(int argc, char* argv[]) {
     bool cli_has_dd_pos = false;  // True if --pos used DD format
     double cli_target_zoom = 1.0;
     double cli_target_angle = 0.0;
+    bool debug_dd = false;
+    bool exit_now = false;  // Exit immediately after parsing (for testing)
 
     static struct option long_options[] = {
         {"pos",   required_argument, 0, 'p'},
         {"zoom",  required_argument, 0, 'z'},
         {"angle", required_argument, 0, 'a'},
         {"auto",  optional_argument, 0, 'A'},
+        {"debug", no_argument,       0, 'D'},
+        {"exit-now", no_argument,    0, 'X'},
         {"help",  no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
-    while ((opt = getopt_long(argc, argv, "p:z:a:Ah", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:z:a:ADh", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'p': {
                 DD re_dd, im_dd;
@@ -2522,12 +2516,37 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 break;
+            case 'D':
+                debug_dd = true;
+                break;
+            case 'X':
+                exit_now = true;
+                debug_dd = true;  // Also enable debug output
+                break;
             case 'h':
                 print_usage(argv[0]);
                 return 0;
             default:
                 print_usage(argv[0]);
                 return 1;
+        }
+    }
+
+    // Debug: Print parsed DD values
+    if (debug_dd && has_target_pos) {
+        fprintf(stderr, "\n=== DD DEBUG: After parsing --pos ===\n");
+        fprintf(stderr, "center_x_dd: hi=%.17g lo=%.17g (0x%llx, 0x%llx)\n",
+                state.center_x_dd.hi, state.center_x_dd.lo,
+                *(unsigned long long*)&state.center_x_dd.hi, *(unsigned long long*)&state.center_x_dd.lo);
+        fprintf(stderr, "center_y_dd: hi=%.17g lo=%.17g (0x%llx, 0x%llx)\n",
+                state.center_y_dd.hi, state.center_y_dd.lo,
+                *(unsigned long long*)&state.center_y_dd.hi, *(unsigned long long*)&state.center_y_dd.lo);
+        fprintf(stderr, "dd_authoritative: %s\n", state.dd_authoritative ? "true" : "false");
+        fprintf(stderr, "NOTE: Run 'q' immediately and check terminal dims at exit to debug visual shift\n");
+        fprintf(stderr, "=====================================\n\n");
+        if (exit_now) {
+            fprintf(stderr, "Exiting immediately (--exit-now)\n");
+            return 0;
         }
     }
 
@@ -2620,6 +2639,20 @@ int main(int argc, char* argv[]) {
 
     // Commit any accumulated pan offset before printing final position
     state.commit_pan_offset();
+
+    // Debug: Print DD values at exit
+    if (debug_dd) {
+        fprintf(stderr, "\n=== DD DEBUG: At exit ===\n");
+        fprintf(stderr, "Terminal: %d x %d (cols x rows as width x height)\n", state.width, state.height);
+        fprintf(stderr, "center_x_dd: hi=%.17g lo=%.17g (0x%llx, 0x%llx)\n",
+                state.center_x_dd.hi, state.center_x_dd.lo,
+                *(unsigned long long*)&state.center_x_dd.hi, *(unsigned long long*)&state.center_x_dd.lo);
+        fprintf(stderr, "center_y_dd: hi=%.17g lo=%.17g (0x%llx, 0x%llx)\n",
+                state.center_y_dd.hi, state.center_y_dd.lo,
+                *(unsigned long long*)&state.center_y_dd.hi, *(unsigned long long*)&state.center_y_dd.lo);
+        fprintf(stderr, "dd_authoritative: %s\n", state.dd_authoritative ? "true" : "false");
+        fprintf(stderr, "=========================\n\n");
+    }
 
     // Print CLI command to return to this location
     // Use DD format (hi:lo) for full precision at deep zoom

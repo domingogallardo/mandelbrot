@@ -296,14 +296,16 @@ inline void compute_reference_orbit(ReferenceOrbit& orbit,
     orbit.Zi_sum.reserve(max_iter + 1);
     orbit.Z_norm.reserve(max_iter + 1);
 
-    // Reserve space for SA coefficients
-    orbit.SA_Ar.reserve(max_iter + 1);
-    orbit.SA_Ai.reserve(max_iter + 1);
-    orbit.SA_Br.reserve(max_iter + 1);
-    orbit.SA_Bi.reserve(max_iter + 1);
-    orbit.SA_Cr.reserve(max_iter + 1);
-    orbit.SA_Ci.reserve(max_iter + 1);
-    orbit.SA_A_norm.reserve(max_iter + 1);
+    // Reserve space for SA coefficients (only if enabled)
+    if (enable_sa) {
+        orbit.SA_Ar.reserve(max_iter + 1);
+        orbit.SA_Ai.reserve(max_iter + 1);
+        orbit.SA_Br.reserve(max_iter + 1);
+        orbit.SA_Bi.reserve(max_iter + 1);
+        orbit.SA_Cr.reserve(max_iter + 1);
+        orbit.SA_Ci.reserve(max_iter + 1);
+        orbit.SA_A_norm.reserve(max_iter + 1);
+    }
 
     // Initial Z = 0
     orbit.Zr_hi.push_back(0.0);
@@ -315,18 +317,20 @@ inline void compute_reference_orbit(ReferenceOrbit& orbit,
     orbit.Z_norm.push_back(0.0);
 
     // Initial SA coefficients: A_0 = B_0 = C_0 = 0 (since δZ_0 = 0)
-    orbit.SA_Ar.push_back(0.0);
-    orbit.SA_Ai.push_back(0.0);
-    orbit.SA_Br.push_back(0.0);
-    orbit.SA_Bi.push_back(0.0);
-    orbit.SA_Cr.push_back(0.0);
-    orbit.SA_Ci.push_back(0.0);
-    orbit.SA_A_norm.push_back(0.0);
+    if (enable_sa) {
+        orbit.SA_Ar.push_back(0.0);
+        orbit.SA_Ai.push_back(0.0);
+        orbit.SA_Br.push_back(0.0);
+        orbit.SA_Bi.push_back(0.0);
+        orbit.SA_Cr.push_back(0.0);
+        orbit.SA_Ci.push_back(0.0);
+        orbit.SA_A_norm.push_back(0.0);
+    }
 
     DDComplex C(center_x, center_y);
     DDComplex Z(0.0, 0.0);
 
-    // SA coefficients (complex numbers)
+    // SA coefficients (complex numbers) - only used if enable_sa
     // δZ_n = A_n*δC + B_n*δC² + C_n*δC³
     double Ar = 0.0, Ai = 0.0;  // A_n
     double Br = 0.0, Bi = 0.0;  // B_n
@@ -352,52 +356,50 @@ inline void compute_reference_orbit(ReferenceOrbit& orbit,
         orbit.Z_norm.push_back(norm);
 
         // ═══════════════════════════════════════════════════════════════════
-        // SA COEFFICIENT RECURRENCE
+        // SA COEFFICIENT RECURRENCE (only if SA is enabled)
         // ═══════════════════════════════════════════════════════════════════
-        // Given: δZ_{n+1} = 2*Z_n*δZ_n + δZ_n² + δC
-        // With: δZ_n = A_n*δC + B_n*δC² + C_n*δC³ + ...
-        //
-        // Recurrence relations (complex multiplication):
-        //   A_{n+1} = 2*Z_n*A_n + 1
-        //   B_{n+1} = 2*Z_n*B_n + A_n²
-        //   C_{n+1} = 2*Z_n*C_n + 2*A_n*B_n
+        if (enable_sa) {
+            // Given: δZ_{n+1} = 2*Z_n*δZ_n + δZ_n² + δC
+            // With: δZ_n = A_n*δC + B_n*δC² + C_n*δC³ + ...
+            //
+            // Recurrence relations (complex multiplication):
+            //   A_{n+1} = 2*Z_n*A_n + 1
+            //   B_{n+1} = 2*Z_n*B_n + A_n²
+            //   C_{n+1} = 2*Z_n*C_n + 2*A_n*B_n
 
-        // Use Z from previous iteration (Z_n before the square+C above)
-        // But we're computing coefficients for iteration n+1, so use Z_n
-        double Zr_prev = (n == 0) ? 0.0 : orbit.Zr_sum[n];
-        double Zi_prev = (n == 0) ? 0.0 : orbit.Zi_sum[n];
+            // Use Z from previous iteration (Z_n before the square+C above)
+            double Zr_prev = (n == 0) ? 0.0 : orbit.Zr_sum[n];
+            double Zi_prev = (n == 0) ? 0.0 : orbit.Zi_sum[n];
 
-        // A_{n+1} = 2*Z_n*A_n + 1
-        // Complex mul: (Zr + Zi*i) * (Ar + Ai*i) = (Zr*Ar - Zi*Ai) + (Zr*Ai + Zi*Ar)*i
-        double new_Ar = 2.0 * (Zr_prev * Ar - Zi_prev * Ai) + 1.0;
-        double new_Ai = 2.0 * (Zr_prev * Ai + Zi_prev * Ar);
+            // A_{n+1} = 2*Z_n*A_n + 1
+            double new_Ar = 2.0 * (Zr_prev * Ar - Zi_prev * Ai) + 1.0;
+            double new_Ai = 2.0 * (Zr_prev * Ai + Zi_prev * Ar);
 
-        // B_{n+1} = 2*Z_n*B_n + A_n²
-        // A² = (Ar + Ai*i)² = (Ar² - Ai²) + (2*Ar*Ai)*i
-        double A2r = Ar * Ar - Ai * Ai;
-        double A2i = 2.0 * Ar * Ai;
-        double new_Br = 2.0 * (Zr_prev * Br - Zi_prev * Bi) + A2r;
-        double new_Bi = 2.0 * (Zr_prev * Bi + Zi_prev * Br) + A2i;
+            // B_{n+1} = 2*Z_n*B_n + A_n²
+            double A2r = Ar * Ar - Ai * Ai;
+            double A2i = 2.0 * Ar * Ai;
+            double new_Br = 2.0 * (Zr_prev * Br - Zi_prev * Bi) + A2r;
+            double new_Bi = 2.0 * (Zr_prev * Bi + Zi_prev * Br) + A2i;
 
-        // C_{n+1} = 2*Z_n*C_n + 2*A_n*B_n
-        // A*B = (Ar*Br - Ai*Bi) + (Ar*Bi + Ai*Br)*i
-        double ABr = Ar * Br - Ai * Bi;
-        double ABi = Ar * Bi + Ai * Br;
-        double new_Cr = 2.0 * (Zr_prev * Cr - Zi_prev * Ci) + 2.0 * ABr;
-        double new_Ci = 2.0 * (Zr_prev * Ci + Zi_prev * Cr) + 2.0 * ABi;
+            // C_{n+1} = 2*Z_n*C_n + 2*A_n*B_n
+            double ABr = Ar * Br - Ai * Bi;
+            double ABi = Ar * Bi + Ai * Br;
+            double new_Cr = 2.0 * (Zr_prev * Cr - Zi_prev * Ci) + 2.0 * ABr;
+            double new_Ci = 2.0 * (Zr_prev * Ci + Zi_prev * Cr) + 2.0 * ABi;
 
-        Ar = new_Ar; Ai = new_Ai;
-        Br = new_Br; Bi = new_Bi;
-        Cr = new_Cr; Ci = new_Ci;
+            Ar = new_Ar; Ai = new_Ai;
+            Br = new_Br; Bi = new_Bi;
+            Cr = new_Cr; Ci = new_Ci;
 
-        // Store coefficients
-        orbit.SA_Ar.push_back(Ar);
-        orbit.SA_Ai.push_back(Ai);
-        orbit.SA_Br.push_back(Br);
-        orbit.SA_Bi.push_back(Bi);
-        orbit.SA_Cr.push_back(Cr);
-        orbit.SA_Ci.push_back(Ci);
-        orbit.SA_A_norm.push_back(Ar * Ar + Ai * Ai);
+            // Store coefficients
+            orbit.SA_Ar.push_back(Ar);
+            orbit.SA_Ai.push_back(Ai);
+            orbit.SA_Br.push_back(Br);
+            orbit.SA_Bi.push_back(Bi);
+            orbit.SA_Cr.push_back(Cr);
+            orbit.SA_Ci.push_back(Ci);
+            orbit.SA_A_norm.push_back(Ar * Ar + Ai * Ai);
+        }
 
         // Use larger escape radius for reference (extends orbit length)
         if (norm > 1e6) {
@@ -419,11 +421,12 @@ inline void compute_reference_orbit(ReferenceOrbit& orbit,
 
 // SA validity criterion: truncation error < tolerance * approximation value
 // We use 3 terms: δZ ≈ A*δC + B*δC² + C*δC³
-// Error is dominated by next term: ~D*δC⁴ ≈ O(|C|*|δC|*|δC³|) = O(|C|*|δC|⁴)
-// Approximation value is ~|A*δC| = |A|*|δC|
-// Criterion: |C|*|δC|⁴ < ε*|A|*|δC| => |C|*|δC|³ < ε*|A|
-// Squaring both sides for numerical convenience: |C|²*|δC|⁶ < ε²*|A|²
-// But we simplify to: |C|²*|δC|² < ε²*|A|² (conservative, works well in practice)
+// Error is dominated by C*δC³ term when truncating to 2 terms (A*δC + B*δC²)
+// For 3-term approximation, we check the cubic term against the linear:
+//   |C*δC³| < ε * |A*δC|
+//   |C|*|δC|² < ε * |A|
+// Squaring both sides for numerical convenience:
+//   |C|²*|δC|⁴ < ε²*|A|²
 constexpr double SA_TOLERANCE = 0.001;  // Conservative tolerance for accuracy
 
 // Find maximum iteration where SA approximation is valid for given δC
@@ -446,36 +449,45 @@ inline int sa_find_skip_iteration(const ReferenceOrbit& orbit,
     }
 
     // Binary search for maximum valid skip iteration
+    // Note: The validity predicate may not be strictly monotonic near periodic
+    // regions where |A_n|/|C_n| oscillates. We use binary search for speed but
+    // validate the result afterward.
     int max_check = std::min(max_iter, orbit.length - 1);
     int best_skip = 0;
 
-    // Use binary search to find the maximum valid skip
+    // Lambda to check validity at iteration n
+    auto is_valid = [&](int n) -> bool {
+        if (n < 1 || n > max_check) return false;
+        double Cr = orbit.SA_Cr[n];
+        double Ci = orbit.SA_Ci[n];
+        double C_norm = Cr * Cr + Ci * Ci;
+        double A_norm = orbit.SA_A_norm[n];
+        if (!std::isfinite(C_norm) || !std::isfinite(A_norm) || A_norm == 0.0)
+            return false;
+        // Validity check: |C|² * |δC|⁴ < ε² * |A|²
+        double lhs = C_norm * dC_norm * dC_norm;
+        double rhs = SA_TOLERANCE * SA_TOLERANCE * A_norm;
+        return lhs < rhs;
+    };
+
+    // Binary search to find approximate maximum valid skip
     int lo = 1, hi = max_check;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
-
-        // Get coefficient norms
-        double Cr = orbit.SA_Cr[mid];
-        double Ci = orbit.SA_Ci[mid];
-        double C_norm = Cr * Cr + Ci * Ci;
-        double A_norm = orbit.SA_A_norm[mid];
-
-        // Guard against overflow/NaN in coefficients
-        if (!std::isfinite(C_norm) || !std::isfinite(A_norm) || A_norm == 0.0) {
-            hi = mid - 1;
-            continue;
-        }
-
-        // Validity check: |C|² * |δC|⁴ < ε² * |A|²
-        // (derived from |C*δC³| << ε*|A*δC|, i.e., |C|*|δC|² < ε*|A|)
-        double lhs = C_norm * dC_norm * dC_norm;
-        double rhs = SA_TOLERANCE * SA_TOLERANCE * A_norm;
-
-        if (lhs < rhs) {
+        if (is_valid(mid)) {
             best_skip = mid;
             lo = mid + 1;  // Try to find larger valid skip
         } else {
             hi = mid - 1;  // Current is invalid, search lower
+        }
+    }
+
+    // Validate best_skip - if non-monotonic, scan backward to find true maximum
+    // This handles cases where validity oscillates near periodic regions
+    if (best_skip > 0 && !is_valid(best_skip)) {
+        // Binary search gave invalid result, scan backward
+        while (best_skip > 0 && !is_valid(best_skip)) {
+            best_skip--;
         }
     }
 

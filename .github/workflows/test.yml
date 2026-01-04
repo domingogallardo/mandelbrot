@@ -37,6 +37,18 @@ jobs:
       run: ./test_trajectory
       timeout-minutes: 10
 
+    - name: Build SA tests
+      run: make test_sa CXX=${{ matrix.compiler }}
+
+    - name: Run SA tests
+      run: ./test_sa
+      timeout-minutes: 5
+
+    - name: SA Benchmark
+      run: |
+        echo "=== SA Benchmark (zoom 1e12) ==="
+        ./mandelbrot --pos "-0.743643887037158704752191506114774+0.131825904205311970493132056385139i" --zoom 1e12 --benchmark 2>&1 || true
+
   build-avx2:
     runs-on: ubuntu-latest
 
@@ -59,3 +71,15 @@ jobs:
     - name: Run AVX2 trajectory tests
       run: ./test_trajectory
       timeout-minutes: 10
+
+    - name: Build SA tests with AVX2
+      run: make test_sa CXXFLAGS="-std=c++17 -O3 -flto -fno-fast-math -mavx2"
+
+    - name: Run AVX2 SA tests
+      run: ./test_sa
+      timeout-minutes: 5
+
+    - name: AVX2 SA Benchmark
+      run: |
+        echo "=== AVX2 SA Benchmark (zoom 1e12) ==="
+        ./mandelbrot --pos "-0.743643887037158704752191506114774+0.131825904205311970493132056385139i" --zoom 1e12 --benchmark 2>&1 || true

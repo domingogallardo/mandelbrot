@@ -15,7 +15,10 @@ TEST_SRC = test_perturbation.cpp
 TEST_TRAJ_TARGET = test_trajectory
 TEST_TRAJ_SRC = test_trajectory.cpp
 
-.PHONY: all clean run avx2 native test test-trajectory test-all
+TEST_SA_TARGET = test_sa
+TEST_SA_SRC = test_sa.cpp
+
+.PHONY: all clean run avx2 native test test-trajectory test-sa test-all
 
 all: $(TARGET)
 
@@ -41,7 +44,7 @@ run: $(TARGET)
 	./$(TARGET)
 
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(TEST_TRAJ_TARGET)
+	rm -f $(TARGET) $(TEST_TARGET) $(TEST_TRAJ_TARGET) $(TEST_SA_TARGET)
 
 # Debug build
 debug: CXXFLAGS = -std=c++17 -g -fsanitize=address
@@ -71,5 +74,12 @@ $(TEST_TRAJ_TARGET): $(TEST_TRAJ_SRC)
 test-trajectory: $(TEST_TRAJ_TARGET)
 	./$(TEST_TRAJ_TARGET)
 
+# Series Approximation test build and run
+$(TEST_SA_TARGET): $(TEST_SA_SRC)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<
+
+test-sa: $(TEST_SA_TARGET)
+	./$(TEST_SA_TARGET)
+
 # Run all tests
-test-all: test test-trajectory
+test-all: test test-trajectory test-sa

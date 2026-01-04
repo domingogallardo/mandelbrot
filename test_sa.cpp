@@ -258,24 +258,23 @@ int sa_find_skip_iteration(const ReferenceOrbit& orbit,
         double Dr = orbit.SA_Dr[best_skip];
         double Di = orbit.SA_Di[best_skip];
 
-        double dC2r = dCr * dCr - dCi * dCi;
-        double dC2i = 2.0 * dCr * dCi;
-        double dC3r = dC2r * dCr - dC2i * dCi;
-        double dC3i = dC2r * dCi + dC2i * dCr;
-        double dC4r = dC3r * dCr - dC3i * dCi;
-        double dC4i = dC3r * dCi + dC3i * dCr;
+        // Horner form: (((D*δC + C)*δC + B)*δC + A)*δC
+        double hr = Dr, hi = Di;
 
-        double term1r = Ar * dCr - Ai * dCi;
-        double term1i = Ar * dCi + Ai * dCr;
-        double term2r = Br * dC2r - Bi * dC2i;
-        double term2i = Br * dC2i + Bi * dC2r;
-        double term3r = Cr * dC3r - Ci * dC3i;
-        double term3i = Cr * dC3i + Ci * dC3r;
-        double term4r = Dr * dC4r - Di * dC4i;
-        double term4i = Dr * dC4i + Di * dC4r;
+        double tr = hr * dCr - hi * dCi;
+        double ti = hr * dCi + hi * dCr;
+        hr = tr + Cr; hi = ti + Ci;
 
-        dzr_out = term1r + term2r + term3r + term4r;
-        dzi_out = term1i + term2i + term3i + term4i;
+        tr = hr * dCr - hi * dCi;
+        ti = hr * dCi + hi * dCr;
+        hr = tr + Br; hi = ti + Bi;
+
+        tr = hr * dCr - hi * dCi;
+        ti = hr * dCi + hi * dCr;
+        hr = tr + Ar; hi = ti + Ai;
+
+        dzr_out = hr * dCr - hi * dCi;
+        dzi_out = hr * dCi + hi * dCr;
 
         if (!std::isfinite(dzr_out) || !std::isfinite(dzi_out)) {
             dzr_out = 0.0;

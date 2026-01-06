@@ -1711,8 +1711,8 @@ void compute_perturbation_avx2(MandelbrotState& state,
                     int cur_iter = (int)iter_arr[i];
                     if (cur_iter >= max_ref_iter && cur_iter < state.max_iter) {
                         // Get current Z = Z_ref[end] + δz (using precomputed sums)
-                        double zr = orbit.Zr_sum[max_ref_iter] + dzr_arr[i];
-                        double zi = orbit.Zi_sum[max_ref_iter] + dzi_arr[i];
+                        double zr = orbit.Zr_sum[max_ref_iter] + dzr_out[i];
+                        double zi = orbit.Zi_sum[max_ref_iter] + dzi_out[i];
 
                         // Compute pixel offset (without pan_offset, we add it via DD below)
                         double dxi = ((x + i) - state.width / 2.0) / state.width * scale * aspect;

@@ -976,6 +976,9 @@ struct MandelbrotState {
     int max_iter = 256;
     int color_scheme = 0;
     double color_rotation = 0.0;
+#if defined(__APPLE__)
+    bool zoom_mode = false;  // macOS: toggle arrow keys between pan and zoom/rotate
+#endif
 
     int width = 80;
     int height = 24;
@@ -2209,6 +2212,10 @@ void render_iterm2_image(MandelbrotState& state) {
         state.image_width, state.image_height,
         display_x, display_y, state.zoom, angle_deg, mode_str);
     printf("%s", status);
+#if defined(__APPLE__)
+    // macOS: Show PAN/ZOOM mode indicator
+    printf(CSI "K" "\x1b[%dG%s", std::max(1, state.width - 3), state.zoom_mode ? "ZOOM" : "PAN ");
+#endif
     fflush(stdout);
 }
 
@@ -2274,6 +2281,13 @@ void render_frame(MandelbrotState& state) {
         display_x, display_y, state.zoom, angle_deg, state.max_iter,
         scheme_names[state.color_scheme], mode_str);
     out += status;
+#if defined(__APPLE__)
+    // macOS: Show PAN/ZOOM mode indicator
+    char nav_buf[32];
+    snprintf(nav_buf, sizeof(nav_buf), CSI "K" "\x1b[%dG%s",
+             std::max(1, state.width - 3), state.zoom_mode ? "ZOOM" : "PAN ");
+    out += nav_buf;
+#endif
 
     printf("%s", out.c_str());
     fflush(stdout);
@@ -2357,6 +2371,16 @@ Key read_key() {
     if (c == 'r' || c == 'R') return KEY_R;
     if (c == 'c' || c == 'C') return KEY_C;
     if (c == 'v' || c == 'V') return KEY_V;
+#if defined(__APPLE__)
+    if (c == 'z' || c == 'Z') {
+        // macOS: Toggle arrow key mode between pan and zoom/rotate
+        if (g_state) {
+            g_state->zoom_mode = !g_state->zoom_mode;
+            g_state->needs_redraw = true;
+        }
+        return KEY_NONE;
+    }
+#endif
     if (c == 'i' || c == 'I') return KEY_I;
     if (c == '+' || c == '=') return KEY_PLUS;
     if (c == '-' || c == '_') return KEY_MINUS;
@@ -2409,6 +2433,72 @@ void handle_input(MandelbrotState& state) {
     bool use_pan_offset = needs_perturbation(state);
 
     switch (key) {
+#if defined(__APPLE__)
+        // macOS zoom mode: arrow keys do zoom/rotate instead of pan
+        case KEY_UP:
+            if (state.zoom_mode) {
+                state.commit_pan_offset();  // Commit before zoom change
+                state.zoom *= zoom_factor;
+                state.needs_redraw = true;
+                break;
+            }
+            // Fall through to pan handling
+            if (use_pan_offset) {
+                double move = 0.1 / state.zoom;
+                state.pan_offset_y = dd_add(state.pan_offset_y, -move);
+            } else {
+                state.center_y -= 0.1 / state.zoom;
+                state.sync_centers_from_double();
+            }
+            state.needs_redraw = true;
+            break;
+        case KEY_DOWN:
+            if (state.zoom_mode) {
+                state.commit_pan_offset();
+                state.zoom /= zoom_factor;
+                state.needs_redraw = true;
+                break;
+            }
+            if (use_pan_offset) {
+                double move = 0.1 / state.zoom;
+                state.pan_offset_y = dd_add(state.pan_offset_y, move);
+            } else {
+                state.center_y += 0.1 / state.zoom;
+                state.sync_centers_from_double();
+            }
+            state.needs_redraw = true;
+            break;
+        case KEY_LEFT:
+            if (state.zoom_mode) {
+                state.angle -= angle_step;
+                state.needs_redraw = true;
+                break;
+            }
+            if (use_pan_offset) {
+                double move = 0.1 / state.zoom;
+                state.pan_offset_x = dd_add(state.pan_offset_x, -move);
+            } else {
+                state.center_x -= 0.1 / state.zoom;
+                state.sync_centers_from_double();
+            }
+            state.needs_redraw = true;
+            break;
+        case KEY_RIGHT:
+            if (state.zoom_mode) {
+                state.angle += angle_step;
+                state.needs_redraw = true;
+                break;
+            }
+            if (use_pan_offset) {
+                double move = 0.1 / state.zoom;
+                state.pan_offset_x = dd_add(state.pan_offset_x, move);
+            } else {
+                state.center_x += 0.1 / state.zoom;
+                state.sync_centers_from_double();
+            }
+            state.needs_redraw = true;
+            break;
+#else
         case KEY_UP:
             if (use_pan_offset) {
                 // Accumulate in pan_offset in SCREEN coords (not rotated)
@@ -2455,6 +2545,7 @@ void handle_input(MandelbrotState& state) {
             }
             state.needs_redraw = true;
             break;
+#endif
 
         case KEY_SHIFT_UP:
             state.commit_pan_offset();  // Commit before zoom change
@@ -3248,6 +3339,9 @@ void print_usage(const char* prog) {
     printf("  1-9                 - Switch color schemes\n");
     printf("  +/-                 - Adjust max iterations\n");
     printf("  I                   - Toggle iTerm2 image mode (higher resolution)\n");
+#if defined(__APPLE__)
+    printf("  Z                   - Toggle arrow mode (Pan <-> Zoom/Rotate)\n");
+#endif
     printf("  R                   - Reset view\n");
     printf("  Q/ESC               - Quit\n");
 }

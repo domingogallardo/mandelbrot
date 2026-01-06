@@ -66,6 +66,7 @@ make native
 | Arrow Keys | Pan view |
 | SHIFT + Up/Down | Zoom in/out |
 | SHIFT + Left/Right | Rotate view |
+| Z (macOS) | Toggle arrow mode (Pan ↔ Zoom/Rotate) |
 | C/V | Rotate color palette |
 | 1-9 | Switch color schemes |
 | +/- | Adjust max iterations |

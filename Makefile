@@ -34,6 +34,7 @@ $(TARGET): $(SRC)
 	@echo "║    Arrow Keys        - Pan view                            ║"
 	@echo "║    SHIFT + Up/Down   - Zoom in/out                         ║"
 	@echo "║    SHIFT + Left/Right- Rotate colors                       ║"
+	@if [ "$$(uname -s)" = "Darwin" ]; then echo "║    Z                 - Toggle arrows: Pan<->Zoom/Rotate    ║"; fi
 	@echo "║    1-9               - Switch color schemes                ║"
 	@echo "║    +/-               - Adjust iterations                   ║"
 	@echo "║    R                 - Reset view                          ║"

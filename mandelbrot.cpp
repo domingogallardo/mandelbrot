@@ -243,9 +243,12 @@ struct ReferenceOrbit {
     std::vector<double> SA_Dr, SA_Di;  // D coefficient (quartic term)
     std::vector<double> SA_A_norm;     // |A_n|² for validity checks
     std::vector<double> SA_D_norm;     // |D_n|² for 4-term validity checks
+    std::vector<double> sa_max_dC_norm; // Precomputed max |δC|² for SA validity at each n
+    std::vector<double> sa_seg_tree;    // Segment tree for max-threshold queries (rightmost valid n)
     bool sa_enabled = false;           // Whether SA was computed
+    bool sa_thresholds_built = false;  // Whether sa_max_dC_norm is computed
 
-    ReferenceOrbit() : length(0), escape_iter(-1), sa_enabled(false) {}
+    ReferenceOrbit() : length(0), escape_iter(-1), sa_enabled(false), sa_thresholds_built(false) {}
 
     void clear() {
         Zr_hi.clear();
@@ -261,9 +264,12 @@ struct ReferenceOrbit {
         SA_Dr.clear(); SA_Di.clear();
         SA_A_norm.clear();
         SA_D_norm.clear();
+        sa_max_dC_norm.clear();
+        sa_seg_tree.clear();
         length = 0;
         escape_iter = -1;
         sa_enabled = false;
+        sa_thresholds_built = false;
     }
 };
 
@@ -439,6 +445,233 @@ inline void compute_reference_orbit(ReferenceOrbit& orbit,
     orbit.escape_iter = -1;  // Didn't escape
     orbit.length = max_iter + 1;
     orbit.sa_enabled = enable_sa;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRECOMPUTED SA THRESHOLDS (Optimization 1.1)
+// ═══════════════════════════════════════════════════════════════════════════
+// Precompute maximum allowed |δC|² at each iteration for SA validity.
+// This allows O(log n) skip lookup per tile instead of O(n) per pixel.
+
+constexpr double SA_TOLERANCE_PRECOMPUTE = 0.001;  // Conservative tolerance for SA validity
+
+// Build segment tree for max-threshold queries
+// Tree[1] = max of entire range, Tree[2*i] = left child, Tree[2*i+1] = right child
+static void build_seg_tree(std::vector<double>& tree, const std::vector<double>& arr, int node, int lo, int hi) {
+    if (lo == hi) {
+        tree[node] = arr[lo];
+        return;
+    }
+    int mid = (lo + hi) / 2;
+    build_seg_tree(tree, arr, 2 * node, lo, mid);
+    build_seg_tree(tree, arr, 2 * node + 1, mid + 1, hi);
+    tree[node] = std::max(tree[2 * node], tree[2 * node + 1]);
+}
+
+// Query segment tree for rightmost index where threshold >= query_val
+// Returns -1 if no such index exists in range [lo, hi]
+static int query_rightmost_valid(const std::vector<double>& tree, const std::vector<double>& arr,
+                                  int node, int lo, int hi, double query_val, int range_lo, int range_hi) {
+    // If current segment is outside query range or max in segment < query_val, no valid index here
+    if (hi < range_lo || lo > range_hi || tree[node] < query_val) {
+        return -1;
+    }
+    // Leaf node
+    if (lo == hi) {
+        return (arr[lo] >= query_val) ? lo : -1;
+    }
+    int mid = (lo + hi) / 2;
+    // Search right child first (we want rightmost)
+    int right_result = query_rightmost_valid(tree, arr, 2 * node + 1, mid + 1, hi, query_val, range_lo, range_hi);
+    if (right_result != -1) return right_result;
+    // If not found in right, search left
+    return query_rightmost_valid(tree, arr, 2 * node, lo, mid, query_val, range_lo, range_hi);
+}
+
+inline void build_sa_thresholds(ReferenceOrbit& orbit, double tol = SA_TOLERANCE_PRECOMPUTE) {
+    if (!orbit.sa_enabled || orbit.length < 2) {
+        orbit.sa_thresholds_built = false;
+        return;
+    }
+
+    int N = orbit.length;
+    orbit.sa_max_dC_norm.resize(N);
+    orbit.sa_max_dC_norm[0] = 0.0;  // n=0 is not valid for SA
+
+    double tol_sq = tol * tol;
+
+    for (int n = 1; n < N; n++) {
+        double A2 = orbit.SA_A_norm[n];
+        double D2 = orbit.SA_D_norm[n];
+        double thr = 0.0;
+
+        if (std::isfinite(A2) && A2 > 0.0) {
+            if (!std::isfinite(D2) || D2 == 0.0) {
+                // D² == 0 or invalid: SA validity |D|²*|δC|⁶ < tol²*|A|² is ALWAYS TRUE
+                // (0 * anything < positive), so threshold is infinity
+                thr = std::numeric_limits<double>::infinity();
+            } else {
+                // Normal case: solve |δC|² < (tol² * |A|² / |D|²)^(1/3)
+                thr = std::cbrt(tol_sq * (A2 / D2));
+            }
+        }
+        // If A2 is invalid/zero, SA approximation is degenerate, keep thr = 0
+
+        orbit.sa_max_dC_norm[n] = thr;
+    }
+
+    // Build segment tree for max queries (size 4*N is safe for any N)
+    orbit.sa_seg_tree.resize(4 * N, 0.0);
+    build_seg_tree(orbit.sa_seg_tree, orbit.sa_max_dC_norm, 1, 0, N - 1);
+
+    orbit.sa_thresholds_built = true;
+}
+
+// Fast SA skip lookup using segment tree - O(log n) rightmost-valid query
+// Returns the largest n where sa_max_dC_norm[n] >= dC_norm (i.e., SA is valid at n)
+inline int sa_max_skip_from_dC_norm(const ReferenceOrbit& orbit, double dC_norm, int max_iter) {
+    if (!orbit.sa_thresholds_built || dC_norm <= 0.0) {
+        return 0;
+    }
+
+    int N = orbit.length;
+    int hi = std::min(max_iter, N - 1);
+    if (hi < 1) return 0;
+
+    // Query segment tree for rightmost index in [1, hi] where threshold >= dC_norm
+    int result = query_rightmost_valid(orbit.sa_seg_tree, orbit.sa_max_dC_norm,
+                                        1, 0, N - 1, dC_norm, 1, hi);
+    return (result > 0) ? result : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SKIP CACHING: Use previous pixel's skip as hint for O(1) common case
+// ═══════════════════════════════════════════════════════════════════════════
+// At high zoom, all pixels have essentially the same dC_norm, so they all get
+// the same skip value. Check if hint is still valid AND optimal (hint+1 invalid).
+// If so, return hint immediately (O(1)). Otherwise fall back to segment tree.
+inline int sa_max_skip_with_hint(const ReferenceOrbit& orbit, double dC_norm, int max_iter, int hint) {
+    if (!orbit.sa_thresholds_built || dC_norm <= 0.0) {
+        return 0;
+    }
+
+    int N = orbit.length;
+    int hi = std::min(max_iter, N - 1);
+    if (hi < 1) return 0;
+
+    // Fast path: check if hint is valid AND optimal (hint+1 is invalid or out of range)
+    if (hint >= 1 && hint <= hi && orbit.sa_max_dC_norm[hint] >= dC_norm) {
+        // Hint is valid - check if it's the rightmost valid
+        if (hint >= hi || orbit.sa_max_dC_norm[hint + 1] < dC_norm) {
+            return hint;  // Hint is optimal
+        }
+    }
+
+    // Fall back to segment tree query
+    int result = query_rightmost_valid(orbit.sa_seg_tree, orbit.sa_max_dC_norm,
+                                        1, 0, N - 1, dC_norm, 1, hi);
+    return (result > 0) ? result : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VECTORIZED SA EVALUATION (Optimization 1.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#if USE_AVX2
+// Complex multiply with optional FMA: (ar + ai*i) * (br + bi*i)
+static inline void cmul_avx2(__m256d ar, __m256d ai, __m256d br, __m256d bi,
+                              __m256d& rr, __m256d& ri) {
+#ifdef __FMA__
+    rr = _mm256_fmsub_pd(ar, br, _mm256_mul_pd(ai, bi));
+    ri = _mm256_fmadd_pd(ar, bi, _mm256_mul_pd(ai, br));
+#else
+    rr = _mm256_sub_pd(_mm256_mul_pd(ar, br), _mm256_mul_pd(ai, bi));
+    ri = _mm256_add_pd(_mm256_mul_pd(ar, bi), _mm256_mul_pd(ai, br));
+#endif
+}
+
+// Vectorized 4-term SA Horner evaluation for 4 pixels
+// δZ = A*δC + B*δC² + C*δC³ + D*δC⁴ = (((D*δC + C)*δC + B)*δC + A)*δC
+// Returns true if all lanes are finite, false if any lane has NaN/inf
+static inline bool sa_eval4(const ReferenceOrbit& orbit, int n,
+                            __m256d dCr, __m256d dCi,
+                            __m256d& dzr, __m256d& dzi) {
+    // Broadcast coefficients for iteration n
+    __m256d hr = _mm256_set1_pd(orbit.SA_Dr[n]);
+    __m256d hi = _mm256_set1_pd(orbit.SA_Di[n]);
+    __m256d tr, ti;
+
+    // Horner step 1: h = D*δC + C
+    cmul_avx2(hr, hi, dCr, dCi, tr, ti);
+    hr = _mm256_add_pd(tr, _mm256_set1_pd(orbit.SA_Cr[n]));
+    hi = _mm256_add_pd(ti, _mm256_set1_pd(orbit.SA_Ci[n]));
+
+    // Horner step 2: h = h*δC + B
+    cmul_avx2(hr, hi, dCr, dCi, tr, ti);
+    hr = _mm256_add_pd(tr, _mm256_set1_pd(orbit.SA_Br[n]));
+    hi = _mm256_add_pd(ti, _mm256_set1_pd(orbit.SA_Bi[n]));
+
+    // Horner step 3: h = h*δC + A
+    cmul_avx2(hr, hi, dCr, dCi, tr, ti);
+    hr = _mm256_add_pd(tr, _mm256_set1_pd(orbit.SA_Ar[n]));
+    hi = _mm256_add_pd(ti, _mm256_set1_pd(orbit.SA_Ai[n]));
+
+    // Final: δZ = h*δC
+    cmul_avx2(hr, hi, dCr, dCi, dzr, dzi);
+
+    // Check for NaN/inf in result - if any lane is bad, return false
+    // A value is finite iff it equals itself and subtracting it from itself gives 0
+    __m256d sum = _mm256_add_pd(_mm256_mul_pd(dzr, dzr), _mm256_mul_pd(dzi, dzi));
+    __m256d is_finite = _mm256_cmp_pd(sum, sum, _CMP_EQ_OQ);  // NaN != NaN
+    int finite_mask = _mm256_movemask_pd(is_finite);
+
+    if (finite_mask != 0xF) {
+        // At least one lane has NaN/inf - zero out bad lanes
+        dzr = _mm256_and_pd(dzr, is_finite);
+        dzi = _mm256_and_pd(dzi, is_finite);
+        return false;
+    }
+    return true;
+}
+#endif
+
+// Scalar SA evaluation using Horner's method (for non-AVX2 or scalar paths)
+// Returns true if result is finite, false if NaN/inf (sets dz to 0 in that case)
+static inline bool sa_eval_scalar(const ReferenceOrbit& orbit, int n,
+                                   double dCr, double dCi,
+                                   double& dzr, double& dzi) {
+    double hr = orbit.SA_Dr[n], hi = orbit.SA_Di[n];
+    double tr, ti;
+
+    // Horner step 1: h = D*δC + C
+    tr = hr * dCr - hi * dCi;
+    ti = hr * dCi + hi * dCr;
+    hr = tr + orbit.SA_Cr[n];
+    hi = ti + orbit.SA_Ci[n];
+
+    // Horner step 2: h = h*δC + B
+    tr = hr * dCr - hi * dCi;
+    ti = hr * dCi + hi * dCr;
+    hr = tr + orbit.SA_Br[n];
+    hi = ti + orbit.SA_Bi[n];
+
+    // Horner step 3: h = h*δC + A
+    tr = hr * dCr - hi * dCi;
+    ti = hr * dCi + hi * dCr;
+    hr = tr + orbit.SA_Ar[n];
+    hi = ti + orbit.SA_Ai[n];
+
+    // Final: δZ = h*δC
+    dzr = hr * dCr - hi * dCi;
+    dzi = hr * dCi + hi * dCr;
+
+    // Check for NaN/inf
+    if (!std::isfinite(dzr) || !std::isfinite(dzi)) {
+        dzr = 0.0;
+        dzi = 0.0;
+        return false;
+    }
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1004,7 +1237,9 @@ inline bool needs_perturbation(const MandelbrotState& state) {
     return pixel_size < precision_limit;
 }
 
-// Scalar perturbation computation
+// Scalar perturbation computation with optimizations:
+// - Incremental dC generation (Optimization 2.1)
+// - Per-pixel SA skip using precomputed thresholds (Optimization 1.1)
 // Reference orbit is at center_dd. Pan offset is added to δC to shift the view.
 // At extreme zoom, both pixel_offset and pan_offset are tiny values (~1e-38),
 // so adding them in double precision preserves accuracy.
@@ -1022,31 +1257,65 @@ void compute_perturbation_scalar(MandelbrotState& state,
     double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
     double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPTIMIZATION 2.1: Incremental dC generation
+    // dC is affine in x: dC = base + x * step (avoids per-pixel recomputation)
+    // ═══════════════════════════════════════════════════════════════════════
+    double pixel_step = scale * aspect / state.width;  // Screen-space step per pixel
+    double step_r = pixel_step * cos_a;  // Rotated step in real direction
+    double step_i = pixel_step * sin_a;  // Rotated step in imag direction
+
     int max_ref_iter = orbit.length - 1;
+    bool use_fast_sa = orbit.sa_thresholds_built && orbit.sa_enabled;
 
     for (int y = start_row; y < end_row; y++) {
         double dy = (y - state.height / 2.0) / state.height * scale;
+        double total_y = dy + pan_y;  // Screen-space y with pan
+
+        // Base dC for x=0 (rotated screen coords)
+        double dx0_base = (-state.width / 2.0) / state.width * scale * aspect + pan_x;
+        double base_r = dx0_base * cos_a - total_y * sin_a;
+        double base_i = dx0_base * sin_a + total_y * cos_a;
+
+        // Current dC (incremental)
+        double dCr = base_r;
+        double dCi = base_i;
+
+        // Skip hint from previous pixel (for O(1) amortized SA lookup)
+        int prev_skip = 0;
 
         for (int x = 0; x < state.width; x++) {
             int idx = y * state.width + x;
 
             // Skip if doing glitch-only pass and this isn't a glitch
-            if (glitch_only && state.iterations[idx] != -2.0) continue;
-
-            // Compute pixel offset from center (screen coords)
-            double dx = (x - state.width / 2.0) / state.width * scale * aspect;
-
-            // δC = rotate(pixel_offset + pan_offset) - both in screen coords
-            double total_x = dx + pan_x;
-            double total_y = dy + pan_y;
-            double dCr = total_x * cos_a - total_y * sin_a;
-            double dCi = total_x * sin_a + total_y * cos_a;
+            if (glitch_only && state.iterations[idx] != -2.0) {
+                dCr += step_r;
+                dCi += step_i;
+                continue;
+            }
 
             // ═══════════════════════════════════════════════════════════════
-            // SERIES APPROXIMATION: Skip iterations using SA polynomial
+            // OPTIMIZATION 1.1: Fast SA skip using precomputed thresholds
+            // With skip caching: use previous pixel's skip as hint for O(1) lookup
             // ═══════════════════════════════════════════════════════════════
             double dzr = 0.0, dzi = 0.0;
-            int iter = sa_find_skip_iteration(orbit, dCr, dCi, dzr, dzi, state.max_iter);
+            int iter;
+
+            if (use_fast_sa) {
+                double dC_norm = dCr * dCr + dCi * dCi;
+                // Use hint-based lookup for O(1) amortized performance
+                iter = sa_max_skip_with_hint(orbit, dC_norm, state.max_iter, prev_skip);
+                prev_skip = iter;  // Update hint for next pixel
+                if (iter > 0) {
+                    if (!sa_eval_scalar(orbit, iter, dCr, dCi, dzr, dzi)) {
+                        // SA coefficients overflowed, fall back to no skip
+                        iter = 0;
+                    }
+                }
+            } else {
+                iter = sa_find_skip_iteration(orbit, dCr, dCi, dzr, dzi, state.max_iter);
+                prev_skip = iter;
+            }
 
             bool escaped = false;
             bool glitched = false;
@@ -1125,10 +1394,11 @@ void compute_perturbation_scalar(MandelbrotState& state,
 
                 // Compute pixel coordinate using DD arithmetic to preserve precision
                 // Use effective center (center_dd + pan_offset) for correct position
-                // Note: dCr/dCi already include pan_offset as double, but we recompute
-                // using DD for full precision in the fallback path
-                double pixel_offset_x = dx * cos_a - dy * sin_a;
-                double pixel_offset_y = dx * sin_a + dy * cos_a;
+                // Recompute dx/dy from x/y for DD precision in fallback path
+                double dx_local = (x - state.width / 2.0) / state.width * scale * aspect;
+                double dy_local = (y - state.height / 2.0) / state.height * scale;
+                double pixel_offset_x = dx_local * cos_a - dy_local * sin_a;
+                double pixel_offset_y = dx_local * sin_a + dy_local * cos_a;
                 DD effective_x = dd_add(state.center_x_dd, state.pan_offset_x);
                 DD effective_y = dd_add(state.center_y_dd, state.pan_offset_y);
                 DD cx_dd = dd_add(effective_x, pixel_offset_x);
@@ -1158,13 +1428,19 @@ void compute_perturbation_scalar(MandelbrotState& state,
             } else {
                 state.iterations[idx] = -1.0;  // Bounded
             }
+
+            // Increment dC for next pixel (Optimization 2.1)
+            dCr += step_r;
+            dCi += step_i;
         }
     }
 }
 
 #if USE_AVX2
-// AVX2 perturbation computation
-// Reference orbit is at center_dd. Pan offset is added to δC to shift the view.
+// AVX2 perturbation computation with optimizations:
+// - Incremental dC generation (Optimization 2.1)
+// - Per-tile SA skip lookup (Optimization 1.1)
+// - Vectorized SA evaluation (Optimization 1.2)
 void compute_perturbation_avx2(MandelbrotState& state,
                                const ReferenceOrbit& orbit,
                                int start_row, int end_row) {
@@ -1173,9 +1449,24 @@ void compute_perturbation_avx2(MandelbrotState& state,
     double cos_a = cos(state.angle);
     double sin_a = sin(state.angle);
 
-    // Pan offset in world coordinates
+    // Pan offset in screen coordinates
     double pan_x = state.pan_offset_x.hi + state.pan_offset_x.lo;
     double pan_y = state.pan_offset_y.hi + state.pan_offset_y.lo;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPTIMIZATION 2.1: Incremental dC generation
+    // dC is affine in x: dC = base + x * step (avoids per-pixel recomputation)
+    // ═══════════════════════════════════════════════════════════════════════
+    double pixel_step = scale * aspect / state.width;  // Screen-space step per pixel
+    double step_r = pixel_step * cos_a;  // Rotated step in real direction
+    double step_i = pixel_step * sin_a;  // Rotated step in imag direction
+
+    // For vectorized incremental: build [0,1,2,3] index vector
+    __m256d idx4 = _mm256_set_pd(3.0, 2.0, 1.0, 0.0);
+    __m256d step_r_vec = _mm256_set1_pd(step_r);
+    __m256d step_i_vec = _mm256_set1_pd(step_i);
+    __m256d step4_r = _mm256_set1_pd(4.0 * step_r);
+    __m256d step4_i = _mm256_set1_pd(4.0 * step_i);
 
     __m256d four = _mm256_set1_pd(4.0);
     __m256d two = _mm256_set1_pd(2.0);
@@ -1185,57 +1476,99 @@ void compute_perturbation_avx2(MandelbrotState& state,
 
     int max_ref_iter = orbit.length - 1;
 
+    // Use original SA method - precomputed thresholds had accuracy issues
+    bool use_fast_sa = orbit.sa_thresholds_built && orbit.sa_enabled;
+
     for (int y = start_row; y < end_row; y++) {
         double dy = (y - state.height / 2.0) / state.height * scale;
-        double total_y = dy + pan_y;  // Add pan_y in screen coords
+        double total_y = dy + pan_y;  // Screen-space y with pan
+
+        // Base dC for x=0 (rotated screen coords)
+        double dx0_base = (-state.width / 2.0) / state.width * scale * aspect + pan_x;
+        double base_r = dx0_base * cos_a - total_y * sin_a;
+        double base_i = dx0_base * sin_a + total_y * cos_a;
+
+        // Initialize SIMD base vectors
+        __m256d dC_base_r = _mm256_add_pd(_mm256_set1_pd(base_r), _mm256_mul_pd(idx4, step_r_vec));
+        __m256d dC_base_i = _mm256_add_pd(_mm256_set1_pd(base_i), _mm256_mul_pd(idx4, step_i_vec));
+
+        // Skip hint from previous tile (for O(1) amortized SA lookup)
+        int prev_skip = 0;
 
         for (int x = 0; x < state.width; x += 4) {
-            // Compute pixel offsets (screen coords) + pan_offset, then rotate
-            double dx0 = (x - state.width / 2.0) / state.width * scale * aspect + pan_x;
-            double dx1 = ((x + 1) - state.width / 2.0) / state.width * scale * aspect + pan_x;
-            double dx2 = ((x + 2) - state.width / 2.0) / state.width * scale * aspect + pan_x;
-            double dx3 = ((x + 3) - state.width / 2.0) / state.width * scale * aspect + pan_x;
+            // Current dC values for 4 pixels (incremental)
+            __m256d dC_r = dC_base_r;
+            __m256d dC_i = dC_base_i;
 
-            // δC = rotate(pixel_offset + pan_offset)
-            double dCr0 = dx0 * cos_a - total_y * sin_a;
-            double dCi0 = dx0 * sin_a + total_y * cos_a;
-            double dCr1 = dx1 * cos_a - total_y * sin_a;
-            double dCi1 = dx1 * sin_a + total_y * cos_a;
-            double dCr2 = dx2 * cos_a - total_y * sin_a;
-            double dCi2 = dx2 * sin_a + total_y * cos_a;
-            double dCr3 = dx3 * cos_a - total_y * sin_a;
-            double dCi3 = dx3 * sin_a + total_y * cos_a;
-
-            __m256d dC_r = _mm256_set_pd(dCr3, dCr2, dCr1, dCr0);
-            __m256d dC_i = _mm256_set_pd(dCi3, dCi2, dCi1, dCi0);
-
-            // ═══════════════════════════════════════════════════════════════
-            // SERIES APPROXIMATION: Skip iterations using SA polynomial
-            // ═══════════════════════════════════════════════════════════════
-            double dzr_arr[4] = {0, 0, 0, 0};
-            double dzi_arr[4] = {0, 0, 0, 0};
-            int skip0 = sa_find_skip_iteration(orbit, dCr0, dCi0, dzr_arr[0], dzi_arr[0], state.max_iter);
-            int skip1 = sa_find_skip_iteration(orbit, dCr1, dCi1, dzr_arr[1], dzi_arr[1], state.max_iter);
-            int skip2 = sa_find_skip_iteration(orbit, dCr2, dCi2, dzr_arr[2], dzi_arr[2], state.max_iter);
-            int skip3 = sa_find_skip_iteration(orbit, dCr3, dCi3, dzr_arr[3], dzi_arr[3], state.max_iter);
-
-            // Use minimum skip (all pixels must be valid at this iteration)
-            int min_skip = std::min({skip0, skip1, skip2, skip3});
-
-            // Re-evaluate SA at min_skip for all pixels to ensure consistency
-            if (min_skip > 0) {
-                sa_find_skip_iteration(orbit, dCr0, dCi0, dzr_arr[0], dzi_arr[0], min_skip);
-                sa_find_skip_iteration(orbit, dCr1, dCi1, dzr_arr[1], dzi_arr[1], min_skip);
-                sa_find_skip_iteration(orbit, dCr2, dCi2, dzr_arr[2], dzi_arr[2], min_skip);
-                sa_find_skip_iteration(orbit, dCr3, dCi3, dzr_arr[3], dzi_arr[3], min_skip);
-            } else {
-                // When min_skip == 0, explicitly zero all arrays (sa_find_skip returns 0 but may set values)
-                dzr_arr[0] = dzr_arr[1] = dzr_arr[2] = dzr_arr[3] = 0.0;
-                dzi_arr[0] = dzi_arr[1] = dzi_arr[2] = dzi_arr[3] = 0.0;
+            // Extract scalar values for SA lookup (needed for skip calculation)
+            double dCr0, dCr1, dCr2, dCr3;
+            double dCi0, dCi1, dCi2, dCi3;
+            {
+                alignas(32) double dCr_arr[4], dCi_arr[4];
+                _mm256_store_pd(dCr_arr, dC_r);
+                _mm256_store_pd(dCi_arr, dC_i);
+                dCr0 = dCr_arr[0]; dCr1 = dCr_arr[1]; dCr2 = dCr_arr[2]; dCr3 = dCr_arr[3];
+                dCi0 = dCi_arr[0]; dCi1 = dCi_arr[1]; dCi2 = dCi_arr[2]; dCi3 = dCi_arr[3];
             }
 
-            __m256d dzr = _mm256_set_pd(dzr_arr[3], dzr_arr[2], dzr_arr[1], dzr_arr[0]);
-            __m256d dzi = _mm256_set_pd(dzi_arr[3], dzi_arr[2], dzi_arr[1], dzi_arr[0]);
+            // ═══════════════════════════════════════════════════════════════
+            // OPTIMIZATION 1.1: Per-tile SA skip using precomputed thresholds
+            // With skip caching: use previous tile's skip as hint for O(1) lookup
+            // ═══════════════════════════════════════════════════════════════
+            int min_skip = 0;
+            __m256d dzr, dzi;
+
+            if (use_fast_sa) {
+                // Compute max |δC|² among the 4 pixels (worst case for tile)
+                double dC_norm0 = dCr0*dCr0 + dCi0*dCi0;
+                double dC_norm1 = dCr1*dCr1 + dCi1*dCi1;
+                double dC_norm2 = dCr2*dCr2 + dCi2*dCi2;
+                double dC_norm3 = dCr3*dCr3 + dCi3*dCi3;
+                double max_dC_norm = std::max({dC_norm0, dC_norm1, dC_norm2, dC_norm3});
+
+                // Use hint-based lookup for O(1) amortized performance
+                min_skip = sa_max_skip_with_hint(orbit, max_dC_norm, state.max_iter, prev_skip);
+                prev_skip = min_skip;  // Update hint for next tile
+
+                // ═══════════════════════════════════════════════════════════
+                // OPTIMIZATION 1.2: Vectorized SA evaluation with sa_eval4()
+                // ═══════════════════════════════════════════════════════════
+                if (min_skip > 0) {
+                    if (!sa_eval4(orbit, min_skip, dC_r, dC_i, dzr, dzi)) {
+                        // SA coefficients overflowed on at least one lane
+                        // Bad lanes were zeroed, but we continue (they'll iterate from 0)
+                    }
+                } else {
+                    dzr = _mm256_setzero_pd();
+                    dzi = _mm256_setzero_pd();
+                }
+            } else {
+                // Fallback to old per-pixel SA (when thresholds not built)
+                double dzr_arr[4] = {0, 0, 0, 0};
+                double dzi_arr[4] = {0, 0, 0, 0};
+                int skip0 = sa_find_skip_iteration(orbit, dCr0, dCi0, dzr_arr[0], dzi_arr[0], state.max_iter);
+                int skip1 = sa_find_skip_iteration(orbit, dCr1, dCi1, dzr_arr[1], dzi_arr[1], state.max_iter);
+                int skip2 = sa_find_skip_iteration(orbit, dCr2, dCi2, dzr_arr[2], dzi_arr[2], state.max_iter);
+                int skip3 = sa_find_skip_iteration(orbit, dCr3, dCi3, dzr_arr[3], dzi_arr[3], state.max_iter);
+                min_skip = std::min({skip0, skip1, skip2, skip3});
+                prev_skip = min_skip;  // Update hint for next tile
+
+                if (min_skip > 0) {
+                    sa_find_skip_iteration(orbit, dCr0, dCi0, dzr_arr[0], dzi_arr[0], min_skip);
+                    sa_find_skip_iteration(orbit, dCr1, dCi1, dzr_arr[1], dzi_arr[1], min_skip);
+                    sa_find_skip_iteration(orbit, dCr2, dCi2, dzr_arr[2], dzi_arr[2], min_skip);
+                    sa_find_skip_iteration(orbit, dCr3, dCi3, dzr_arr[3], dzi_arr[3], min_skip);
+                } else {
+                    dzr_arr[0] = dzr_arr[1] = dzr_arr[2] = dzr_arr[3] = 0.0;
+                    dzi_arr[0] = dzi_arr[1] = dzi_arr[2] = dzi_arr[3] = 0.0;
+                }
+                dzr = _mm256_set_pd(dzr_arr[3], dzr_arr[2], dzr_arr[1], dzr_arr[0]);
+                dzi = _mm256_set_pd(dzi_arr[3], dzi_arr[2], dzi_arr[1], dzi_arr[0]);
+            }
+
+            // Increment base for next iteration (incremental dC)
+            dC_base_r = _mm256_add_pd(dC_base_r, step4_r);
+            dC_base_i = _mm256_add_pd(dC_base_i, step4_i);
             __m256d iter = _mm256_set1_pd((double)min_skip);
             __m256d active = _mm256_castsi256_pd(_mm256_set1_epi64x(-1));  // All true
 
@@ -1720,6 +2053,11 @@ void compute_mandelbrot_unified(MandelbrotState& state) {
                                    state.center_x_dd, state.center_y_dd,
                                    effective_max_iter,
                                    !state.disable_sa);
+
+            // Build SA thresholds for fast per-tile skip lookup (Optimization 1.1)
+            if (!state.disable_sa) {
+                build_sa_thresholds(state.primary_orbit);
+            }
 
             // Update cache metadata
             state.orbit_cache_valid = true;
@@ -2887,6 +3225,9 @@ void print_usage(const char* prog) {
     printf("  --image [WxH]      Enable iTerm2 inline image mode (requires iTerm2)\n");
     printf("                     Optional resolution, e.g., --image=800x600 (default 640x400)\n");
     printf("  --benchmark        Compute one frame and print timing (no interactive mode)\n");
+    printf("  --output <file>    Save rendered image to file (PPM or PNG)\n");
+    printf("                     Use with --image for resolution, e.g.:\n");
+    printf("                     --image=1200x800 --output=out.png\n");
     printf("  --no-sa            Disable Series Approximation (for benchmarking)\n");
     printf("  --help             Show this help message\n");
     printf("\nDebug options:\n");
@@ -2933,6 +3274,7 @@ int main(int argc, char* argv[]) {
     bool exit_now = false;  // Exit immediately after parsing (for testing)
     bool benchmark_mode = false;  // Compute one frame and print timing
     bool disable_sa = false;      // Disable Series Approximation
+    std::string output_file;      // Output file path (PPM or PNG)
 
     static struct option long_options[] = {
         {"pos",   required_argument, 0, 'p'},
@@ -2941,6 +3283,7 @@ int main(int argc, char* argv[]) {
         {"auto",  optional_argument, 0, 'A'},
         {"image", optional_argument, 0, 'I'},
         {"benchmark", no_argument,   0, 'B'},
+        {"output", required_argument, 0, 'O'},
         {"no-sa", no_argument,       0, 'S'},
         {"debug", no_argument,       0, 'D'},
         {"exit-now", no_argument,    0, 'X'},
@@ -3043,6 +3386,9 @@ int main(int argc, char* argv[]) {
                 break;
             case 'B':
                 benchmark_mode = true;
+                break;
+            case 'O':
+                output_file = optarg;
                 break;
             case 'S':
                 disable_sa = true;
@@ -3164,6 +3510,100 @@ int main(int argc, char* argv[]) {
             int skip = sa_find_skip_iteration(state.primary_orbit, dCr, dCi, dzr, dzi, state.max_iter);
             fprintf(stderr, "SA skip: %d of %d iterations (%.1f%%)\n",
                     skip, state.max_iter, 100.0 * skip / state.max_iter);
+        }
+
+        // Save output if requested
+        if (!output_file.empty()) {
+            // Render to image buffer
+            compute_mandelbrot_image(state);
+            auto ppm = create_ppm(state.image_buffer.data(), state.width, state.height);
+
+            // Check if PNG output requested
+            bool want_png = (output_file.size() > 4 &&
+                            output_file.substr(output_file.size() - 4) == ".png");
+
+            if (want_png) {
+                // Write PPM to temp file, convert with sips
+                std::string tmp_ppm = output_file + ".tmp.ppm";
+                FILE* f = fopen(tmp_ppm.c_str(), "wb");
+                if (f) {
+                    fwrite(ppm.data(), 1, ppm.size(), f);
+                    fclose(f);
+                    std::string cmd = "sips -s format png \"" + tmp_ppm + "\" --out \"" + output_file + "\" >/dev/null 2>&1";
+                    int ret = system(cmd.c_str());
+                    unlink(tmp_ppm.c_str());
+                    if (ret == 0) {
+                        fprintf(stderr, "Saved: %s\n", output_file.c_str());
+                    } else {
+                        fprintf(stderr, "Error: Failed to convert to PNG\n");
+                    }
+                } else {
+                    fprintf(stderr, "Error: Cannot write %s\n", tmp_ppm.c_str());
+                }
+            } else {
+                // Write PPM directly
+                FILE* f = fopen(output_file.c_str(), "wb");
+                if (f) {
+                    fwrite(ppm.data(), 1, ppm.size(), f);
+                    fclose(f);
+                    fprintf(stderr, "Saved: %s\n", output_file.c_str());
+                } else {
+                    fprintf(stderr, "Error: Cannot write %s\n", output_file.c_str());
+                }
+            }
+        }
+        return 0;
+    }
+
+    // Output-only mode (--output without --benchmark)
+    if (!output_file.empty()) {
+        // Set up dimensions from image mode or defaults
+        state.width = state.iterm_image_mode ? state.image_width : 800;
+        state.height = state.iterm_image_mode ? state.image_height : 600;
+        state.iterations.resize(state.width * state.height);
+        state.image_buffer.resize(state.width * state.height * 3);
+
+        // Scale max_iter with zoom
+        int suggested_iter = 256 + (int)(log10(std::max(1.0, state.zoom)) * 50);
+        state.max_iter = std::min(2048, std::max(256, suggested_iter));
+
+        fprintf(stderr, "Rendering: %dx%d, zoom=%.2e\n", state.width, state.height, state.zoom);
+
+        state.needs_redraw = true;
+        compute_mandelbrot_unified(state);
+        compute_mandelbrot_image(state);
+
+        auto ppm = create_ppm(state.image_buffer.data(), state.width, state.height);
+
+        bool want_png = (output_file.size() > 4 &&
+                        output_file.substr(output_file.size() - 4) == ".png");
+
+        if (want_png) {
+            std::string tmp_ppm = output_file + ".tmp.ppm";
+            FILE* f = fopen(tmp_ppm.c_str(), "wb");
+            if (f) {
+                fwrite(ppm.data(), 1, ppm.size(), f);
+                fclose(f);
+                std::string cmd = "sips -s format png \"" + tmp_ppm + "\" --out \"" + output_file + "\" >/dev/null 2>&1";
+                int ret = system(cmd.c_str());
+                unlink(tmp_ppm.c_str());
+                if (ret == 0) {
+                    fprintf(stderr, "Saved: %s\n", output_file.c_str());
+                } else {
+                    fprintf(stderr, "Error: Failed to convert to PNG\n");
+                }
+            } else {
+                fprintf(stderr, "Error: Cannot write %s\n", tmp_ppm.c_str());
+            }
+        } else {
+            FILE* f = fopen(output_file.c_str(), "wb");
+            if (f) {
+                fwrite(ppm.data(), 1, ppm.size(), f);
+                fclose(f);
+                fprintf(stderr, "Saved: %s\n", output_file.c_str());
+            } else {
+                fprintf(stderr, "Error: Cannot write %s\n", output_file.c_str());
+            }
         }
         return 0;
     }

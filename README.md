@@ -7,7 +7,7 @@ Ultra-fast console-based Mandelbrot fractal explorer with deep zoom capabilities
 ## Features
 
 - **Deep Zoom**: Explore to zoom levels beyond 10^30 using perturbation theory
-- **Series Approximation**: ~1000x theoretical speedup at deep zoom via 4-term polynomial
+- **Series Approximation**: Significant speedup at deep zoom via 4-term polynomial approximation
 - **Double-Double Precision**: ~31 decimal digits of precision for reference orbit computation
 - **AVX2 SIMD**: Optional 4x parallel pixel computation on supported CPUs
 - **Smooth Animation**: Trajectory mode with ease-in-out cubic easing
@@ -48,13 +48,15 @@ make native
 
 | Option | Description |
 |--------|-------------|
-| `--pos <re+imi>` | Target position (e.g., `-0.5+0.3i`) |
+| `--pos <position>` | Target position: standard (`-0.5+0.3i`) or DD format (`re_hi:re_lo+im_hi:im_loi`) for deep zoom |
 | `--zoom <value>` | Target zoom level (e.g., `1e6`) |
 | `--angle <degrees>` | Target view angle (e.g., `45`) |
 | `--auto [N]` | Auto exploration, or trajectory over N seconds |
 | `--image [WxH]` | iTerm2 image mode (e.g., `--image=800x600`) |
+| `--output <file>` | Save rendered image to file (PPM or PNG on macOS) |
 | `--benchmark` | Compute one frame and print timing (no interactive mode) |
 | `--no-sa` | Disable Series Approximation (for comparison/debugging) |
+| `--debug` | Print DD precision values and exit |
 | `--help` | Show help message |
 
 ### Interactive Controls
@@ -87,7 +89,7 @@ The coefficients follow recurrence relations derived from the Mandelbrot iterati
 - `C_{n+1} = 2*Z_n*C_n + 2*A_n*B_n`
 - `D_{n+1} = 2*Z_n*D_n + 2*A_n*C_n + B_n²`
 
-Instead of iterating each pixel individually, SA evaluates this polynomial to skip directly to a later iteration. At zoom 1e12, SA typically skips 100% of iterations, providing **~1000x theoretical speedup**.
+Instead of iterating each pixel individually, SA evaluates this polynomial to skip directly to a later iteration. The number of skipped iterations varies by position and zoom level; in favorable cases SA can skip a significant portion of iterations, providing substantial speedup.
 
 The validity check ensures the approximation error stays below tolerance:
 ```
@@ -120,6 +122,7 @@ When running in iTerm2 (detected via `LC_TERMINAL` or `ITERM_SESSION_ID`), the e
 - POSIX terminal with ANSI escape code support
 - Optional: CPU with AVX2 for SIMD acceleration
 - Optional: iTerm2 for high-resolution image mode
+- Optional: macOS for PNG output (uses `sips`); PPM output works on all platforms
 
 ## License
 
